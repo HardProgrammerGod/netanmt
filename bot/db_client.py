@@ -1,112 +1,173 @@
 import random
+import logging
 from supabase import create_client, Client
 from bot.config import SUPABASE_URL, SUPABASE_KEY
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+logger = logging.getLogger(__name__)
 
 class DBClient:
-    @staticmethod
-    def get_or_create_user(user_id: int, username: str, first_name: str, referrer_id: int = None):
-        res = supabase.table("users").select("*").eq("id", user_id).execute()
-        if not res.data:
-            data = {
-                "id": user_id,
-                "username": username,
-                "first_name": first_name,
-                "referrer_id": referrer_id if referrer_id and referrer_id != user_id else None
-            }
-            res = supabase.table("users").insert(data).execute()
-            if referrer_id and referrer_id != user_id:
-                ref_res = supabase.table("users").select("xp").eq("id", referrer_id).execute()
-                if ref_res.data:
-                    supabase.table("users").update({"xp": ref_res.data[0]["xp"] + 100}).eq("id", referrer_id).execute()
-            return res.data[0], True
-        return res.data[0], False
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    @staticmethod
-    def get_next_question(user_id: int):
-        answered_res = supabase.table("user_answers").select("question_id").eq("user_id", user_id).execute()
-        answered_ids = [r["question_id"] for r in answered_res.data]
+    # --- Юзери та Рефералка ---
 
-        query = supabase.table("questions").select("*")
-        if answered_ids:
-            query = query.not_.filter("id", "in", f"({','.join(answered_ids)})")
-
-        res = query.execute()
-        if not res.data:
-            res = supabase.table("questions").select("*").execute()
+    @classmethod
+    def get_or_create_user(cls, user_id: int, username: str, first_name: str, referrer_id: int = None):
+        try:
+            res = cls.supabase.table("users").select("*").eq("id", user_id).execute()
             
-        return random.choice(res.data) if res.data else None
+            if not res.data:
+                valid_referrer = referrer_id if (referrer_id and referrer_id != user_id) else None
+                
+                data = {
+                    "id": user_id,
+                    "username": username or "",
+                    "first_name": first_name or "",
+                    "referrer_id": valid_referrer,
+                    "xp": 0,
+                    "energy": 5,
+                    "is_premium": False
+                }
+                res = cls.supabase.table("users").insert(data).execute()
+                
+                # Бонус рефералу (+100 XP)
+                if valid_referrer:
+                    try:
+                        ref_res = cls.supabase.table("users").select("xp").eq("id", valid_referrer).execute()
+                        if ref_res.data:
+                            current_xp = ref_res.data[0].get("xp", 0)
+                            cls.supabase.table("users").update({"xp": current_xp + 100}).eq("id", valid_referrer).execute()
+                    except Exception as ref_err:
+                        logger.error(f"Помилка нарахування XP рефералу {valid_referrer}: {ref_err}")
 
-    @staticmethod
-    def record_answer(user_id: int, question_id: str, is_correct: bool):
-        supabase.table("user_answers").insert({
-            "user_id": user_id,
-            "question_id": question_id,
-            "is_correct": is_correct
-        }).execute()
+                return res.data[0], True # Новий юзер
+                
+            return res.data[0], False # Існуючий юзер
+        except Exception as e:
+            logger.error(f"Помилка у get_or_create_user: {e}")
+            return None, False
 
-        if is_correct:
-            user_res = supabase.table("users").select("xp").eq("id", user_id).execute()
-            if user_res.data:
-                supabase.table("users").update({"xp": user_res.data[0]["xp"] + 15}).eq("id", user_id).execute()
+    @classmethod
+    def set_premium(cls, user_id: int):
+        try:
+            cls.supabase.table("users").update({"is_premium": True, "energy": 999}).eq("id", user_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Помилка активації Premium: {e}")
+            return False
 
-    @staticmethod
-    def get_leaderboard():
-        res = supabase.table("weekly_leaderboard").select("*").limit(10).execute()
-        return res.data
+    # --- Питання та Відповіді ---
 
-    @staticmethod
-    def add_question(topic: str, difficulty: int, question_text: str, options: list, correct_option: int, explanation: str = ""):
-        data = {
-            "topic": topic.lower().strip(),
-            "difficulty": int(difficulty),
-            "question_text": question_text,
-            "options": options,
-            "correct_option": int(correct_option),
-            "explanation": explanation
-        }
-        return supabase.table("questions").insert(data).execute()
+    @classmethod
+    def get_next_question(cls, user_id: int):
+        try:
+            answered_res = cls.supabase.table("user_answers").select("question_id").eq("user_id", user_id).execute()
+            answered_ids = [r["question_id"] for r in answered_res.data] if answered_res.data else []
 
-    @staticmethod
-    def get_user_roadmap(user_id: int):
-        """Отримує всі теми та статус їх відкриття для юзера"""
-        topics = supabase.table("topics").select("*").order("order_index").execute().data
-        user_progress = supabase.table("user_topics").select("*").eq("user_id", user_id).execute().data
-        
-        completed_topics = {p["topic_id"] for p in user_progress if p["is_completed"]}
+            query = cls.supabase.table("questions").select("*")
+            if answered_ids:
+                query = query.not_.filter("id", "in", f"({','.join(map(str, answered_ids))})")
 
-        roadmap = []
-        # Перша тема відкрита завжди, наступні — якщо пройдена попередня
-        previous_completed = True 
+            res = query.execute()
+            if not res.data:
+                res = cls.supabase.table("questions").select("*").execute()
+                
+            return random.choice(res.data) if res.data else None
+        except Exception as e:
+            logger.error(f"Помилка у get_next_question: {e}")
+            return None
 
-        for t in topics:
-            is_completed = t["id"] in completed_topics
-            is_unlocked = previous_completed
+    @classmethod
+    def record_answer(cls, user_id: int, question_id: str, is_correct: bool):
+        try:
+            cls.supabase.table("user_answers").insert({
+                "user_id": user_id,
+                "question_id": question_id,
+                "is_correct": is_correct
+            }).execute()
 
-            roadmap.append({
-                "id": t["id"],
-                "title": t["title"],
-                "icon": t["icon"],
-                "order": t["order_index"],
-                "is_completed": is_completed,
-                "is_unlocked": is_unlocked
-            })
-            previous_completed = is_completed
+            if is_correct:
+                user_res = cls.supabase.table("users").select("xp").eq("id", user_id).execute()
+                if user_res.data:
+                    current_xp = user_res.data[0].get("xp", 0)
+                    cls.supabase.table("users").update({"xp": current_xp + 15}).eq("id", user_id).execute()
+        except Exception as e:
+            logger.error(f"Помилка у record_answer: {e}")
 
-        return roadmap
+    @classmethod
+    def add_question(cls, topic: str, difficulty: int, question_text: str, options: list, correct_option: int, explanation: str = ""):
+        try:
+            data = {
+                "topic": topic.lower().strip(),
+                "difficulty": int(difficulty),
+                "question_text": question_text,
+                "options": options,
+                "correct_option": int(correct_option),
+                "explanation": explanation
+            }
+            return cls.supabase.table("questions").insert(data).execute()
+        except Exception as e:
+            logger.error(f"Помилка у add_question: {e}")
+            return None
 
-    @staticmethod
-    def unlock_topic(user_id: int, topic_id: str):
-        """Позначає тему як пройдену"""
-        supabase.table("user_topics").upsert({
-            "user_id": user_id,
-            "topic_id": topic_id,
-            "is_completed": True
-        }).execute()
+    # --- Дорожня карта та Тести ---
 
-    @staticmethod
-    def get_test_questions(topic_id: str, limit: int = 5):
-        """Бере случайные вопросы для теста-пропуска"""
-        res = supabase.table("questions").select("*").eq("topic", topic_id).limit(limit).execute()
-        return res.data
+    @classmethod
+    def get_user_roadmap(cls, user_id: int):
+        try:
+            topics = cls.supabase.table("topics").select("*").order("order_index").execute().data or []
+            user_progress = cls.supabase.table("user_topics").select("*").eq("user_id", user_id).execute().data or []
+            
+            completed_topics = {p["topic_id"] for p in user_progress if p.get("is_completed")}
+
+            roadmap = []
+            previous_completed = True 
+
+            for t in topics:
+                is_completed = t["id"] in completed_topics
+                is_unlocked = previous_completed
+
+                roadmap.append({
+                    "id": t["id"],
+                    "title": t["title"],
+                    "icon": t.get("icon", "📚"),
+                    "order": t["order_index"],
+                    "is_completed": is_completed,
+                    "is_unlocked": is_unlocked
+                })
+                previous_completed = is_completed
+
+            return roadmap
+        except Exception as e:
+            logger.error(f"Помилка у get_user_roadmap: {e}")
+            return []
+
+    @classmethod
+    def unlock_topic(cls, user_id: int, topic_id: str):
+        try:
+            cls.supabase.table("user_topics").upsert({
+                "user_id": user_id,
+                "topic_id": topic_id,
+                "is_completed": True
+            }).execute()
+        except Exception as e:
+            logger.error(f"Помилка у unlock_topic: {e}")
+
+    @classmethod
+    def get_test_questions(cls, topic_id: str, limit: int = 5):
+        try:
+            res = cls.supabase.table("questions").select("*").eq("topic", topic_id).limit(limit).execute()
+            return res.data or []
+        except Exception as e:
+            logger.error(f"Помилка у get_test_questions: {e}")
+            return []
+
+    # --- Лідерборд ---
+
+    @classmethod
+    def get_leaderboard(cls):
+        try:
+            res = cls.supabase.table("weekly_leaderboard").select("*").limit(10).execute()
+            return res.data or []
+        except Exception as e:
+            logger.error(f"Помилка у get_leaderboard: {e}")
+            return []
