@@ -67,3 +67,46 @@ class DBClient:
             "explanation": explanation
         }
         return supabase.table("questions").insert(data).execute()
+
+    @staticmethod
+    def get_user_roadmap(user_id: int):
+        """Отримує всі теми та статус їх відкриття для юзера"""
+        topics = supabase.table("topics").select("*").order("order_index").execute().data
+        user_progress = supabase.table("user_topics").select("*").eq("user_id", user_id).execute().data
+        
+        completed_topics = {p["topic_id"] for p in user_progress if p["is_completed"]}
+
+        roadmap = []
+        # Перша тема відкрита завжди, наступні — якщо пройдена попередня
+        previous_completed = True 
+
+        for t in topics:
+            is_completed = t["id"] in completed_topics
+            is_unlocked = previous_completed
+
+            roadmap.append({
+                "id": t["id"],
+                "title": t["title"],
+                "icon": t["icon"],
+                "order": t["order_index"],
+                "is_completed": is_completed,
+                "is_unlocked": is_unlocked
+            })
+            previous_completed = is_completed
+
+        return roadmap
+
+    @staticmethod
+    def unlock_topic(user_id: int, topic_id: str):
+        """Позначає тему як пройдену"""
+        supabase.table("user_topics").upsert({
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "is_completed": True
+        }).execute()
+
+    @staticmethod
+    def get_test_questions(topic_id: str, limit: int = 5):
+        """Бере случайные вопросы для теста-пропуска"""
+        res = supabase.table("questions").select("*").eq("topic", topic_id).limit(limit).execute()
+        return res.data
