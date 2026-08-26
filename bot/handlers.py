@@ -4,6 +4,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from bot.keyboards import get_premium_plans_kb, get_payment_link_kb
+from bot.payments import generate_wayforpay_link
 
 from bot.keyboards import (
     get_main_reply_keyboard, 
@@ -243,3 +245,25 @@ async def process_successful_payment(message: Message):
         )
     else:
         await message.answer("⚠️ Оплата отримана, але сталася помилка оновлення БД. Зверніться до підтримки.")
+
+@router.message(F.text.contains("Premium"))
+async def show_premium_options(message: Message):
+    text = (
+        "⭐ **Обери тариф підготовки до НМТ:**\n\n"
+        "• **1 місяць (399 грн)** — повний доступ до всіх тем та тестів на 30 днів.\n"
+        "• **Вся підготовка (1699 грн)** — доступ до кінця складання НМТ без обмежень!\n\n"
+        "Оплата здійснюється безпечно через WayForPay (картка, Apple Pay, Google Pay)."
+    )
+    await message.answer(text, reply_markup=get_premium_plans_kb(), parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("buy_plan_"))
+async def process_buy_plan(query: CallbackQuery):
+    await query.answer()
+    plan_type = query.data.replace("buy_plan_", "") # 'month' або 'full'
+    
+    pay_url = generate_wayforpay_link(query.from_user.id, plan_type)
+    
+    plan_name = "1 місяць (399 грн)" if plan_type == "month" else "Вся підготовка (1699 грн)"
+    text = f"💳 **Оформлення підписки:** {plan_name}\n\nНатисніть кнопку нижче для переходу на захищену сторінку оплати WayForPay:"
+    
+    await query.message.edit_text(text, reply_markup=get_payment_link_kb(pay_url), parse_mode="Markdown")
