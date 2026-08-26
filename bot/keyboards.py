@@ -1,84 +1,51 @@
-from typing import Optional
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from aiogram.filters.callback_data import CallbackData
 
-
-# ----------------------------------------------------------------------
-# Callback Data Factories (Типізована обробка callback-запитів)
-# ----------------------------------------------------------------------
-class MenuCallback(CallbackData, prefix="menu"):
-    action: str
-    item_id: Optional[int] = None
-
-
-class NavigationCallback(CallbackData, prefix="nav"):
-    page: int
-
-
-# ----------------------------------------------------------------------
-# Inline Keyboards
-# ----------------------------------------------------------------------
-def get_main_inline_keyboard() -> InlineKeyboardMarkup:
-    """Головна inline-клавіатура користувача."""
-    builder = InlineKeyboardBuilder()
-    
-    builder.button(
-        text="👤 Профіль", 
-        callback_data=MenuCallback(action="profile")
-    )
-    builder.button(
-        text="⚙️ Налаштування", 
-        callback_data=MenuCallback(action="settings")
-    )
-    builder.button(
-        text="ℹ️ Допомога", 
-        callback_data=MenuCallback(action="help")
-    )
-    
-    # Регулювання ґратки: 2 кнопки в першому рядку, 1 у другому
-    builder.adjust(2, 1)
-    return builder.as_markup()
-
-
-def get_pagination_keyboard(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
-    """Універсальна клавіатура для пагінації (гортання)."""
-    builder = InlineKeyboardBuilder()
-    
-    if current_page > 1:
-        builder.button(
-            text="⬅️ Назад", 
-            callback_data=NavigationCallback(page=current_page - 1)
-        )
-    
-    builder.button(
-        text=f"📄 {current_page}/{total_pages}", 
-        callback_data="ignore"
-    )
-    
-    if current_page < total_pages:
-        builder.button(
-            text="Вперед ➡️", 
-            callback_data=NavigationCallback(page=current_page + 1)
-        )
-        
-    builder.adjust(3)
-    return builder.as_markup()
-
-
-# ----------------------------------------------------------------------
-# Reply Keyboards (Текстові кнопки під полем вводу)
-# ----------------------------------------------------------------------
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Головне меню текстових кнопок."""
     builder = ReplyKeyboardBuilder()
+    builder.button(text="🗺 Карта навчання")
+    builder.button(text="👤 Профіль")
+    builder.button(text="🏆 Лідерборд")
+    builder.button(text="⭐ Купити Premium (Карткою)")
+    builder.adjust(2, 2)
+    return builder.as_markup(resize_keyboard=True, persistent=True)
+
+def roadmap_kb(roadmap: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if not roadmap:
+        builder.button(text="🔄 Оновити", callback_data="show_roadmap")
+        return builder.as_markup()
+
+    for item in roadmap:
+        if item["is_completed"]:
+            status = "✅"
+        elif item["is_unlocked"]:
+            status = "🎯 В процесі"
+        else:
+            status = "🔒"
+
+        btn_text = f"{status} {item['icon']} {item['title']}"
+        builder.button(text=btn_text, callback_data=f"select_topic_{item['id']}")
+
+    builder.adjust(1)
+    return builder.as_markup()
+
+def topic_action_kb(topic_id: str, is_unlocked: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if is_unlocked:
+        builder.button(text="📖 Вчити тему (Тест)", callback_data=f"start_learn_{topic_id}")
+        builder.button(text="⚡ Тест-пропуск (Skip)", callback_data=f"start_skip_{topic_id}")
+    else:
+        builder.button(text="🔒 Тест для розблокування", callback_data=f"start_skip_{topic_id}")
     
-    builder.button(text="🚀 Головне меню")
-    builder.button(text="📊 Статистика")
-    builder.button(text="📞 Підтримка")
-    
-    builder.adjust(2, 1)
-    return builder.as_markup(
-        resize_keyboard=True,
-        persistent=True
-    )
+    builder.button(text="🔙 Назад до карти", callback_data="show_roadmap")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def test_answers_kb(options: list, question_id: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for idx, option in enumerate(options):
+        # Передаємо індекс обраного варіанту відповіді
+        builder.button(text=f"{idx + 1}. {option}", callback_data=f"ans_{idx}")
+    builder.adjust(1)
+    return builder.as_markup()
