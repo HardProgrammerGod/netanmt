@@ -9,3 +9,4 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 raw_admins = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(i.strip()) for i in raw_admins.split(",") if i.strip().isdigit()]
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
