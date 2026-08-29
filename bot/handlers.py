@@ -1,7 +1,9 @@
+import asyncio
 import logging
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 
 from bot.config import ADMIN_IDS, WEB_APP_URL
 from bot.db_client import DBClient
@@ -16,13 +18,15 @@ from bot.keyboards import (
 logger = logging.getLogger(__name__)
 router = Router()
 
+# ================= USER HANDLERS =================
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or ""
     
-    # Витягуємо реферала, якщо він перейшов за посиланням /start <ref_id>
+    # Витягуємо ID реферера, якщо користувач перейшов за посиланням t.me/bot?start=123456
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
     referrer_id = int(args[0]) if args and args[0].isdigit() else None
     
@@ -34,7 +38,7 @@ async def cmd_start(message: Message):
             referrer_id=referrer_id
         )
     except Exception as e:
-        logger.error(f"Помилка створення користувача: {e}")
+        logger.error(f"Помилка створення користувача {user_id}: {e}")
 
     is_admin = user_id in ADMIN_IDS
     text = (
@@ -93,11 +97,39 @@ async def cb_show_profile(callback: CallbackQuery):
         parse_mode="Markdown"
     )
 
+@router.callback_query(F.data == "show_referral")
+async def cb_show_referral(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    user_id = callback.from_user.id
+    
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+    
+    user_data = await DBClient.get_or_create_user(
+        user_id=user_id, 
+        username=callback.from_user.username, 
+        first_name=callback.from_user.first_name
+    )
+    referrals_count = user_data.get("referrals_count", 0)
+    
+    ref_text = (
+        f"🎁 **Реферальна програма**\n\n"
+        f"Запрошуй друзів готуватися до НМТ разом!\n"
+        f"За кожні **2 запрошених друзів** ти безкоштовно отримуєш **Premium-доступ**.\n\n"
+        f"📊 Твої запрошення: **{referrals_count} друзів**\n\n"
+        f"🔗 Твоє унікальне посилання:\n`{ref_link}`"
+    )
+    
+    await callback.message.edit_text(
+        ref_text,
+        reply_markup=get_profile_keyboard(),
+        parse_mode="Markdown"
+    )
+
 @router.callback_query(F.data == "show_tariffs")
 async def cb_show_tariffs(callback: CallbackQuery):
     await callback.answer()
     
-    # Психологічно переконуючий текст (орієнтований на абітурієнтів та батьків)
     tariffs_text = (
         f"🎯 **Твій впевнений крок до 190+ на НМТ!**\n\n"
         f"Більшість втрачає бали не через незнання мови, а через пастки у форматах завдань. "
@@ -127,7 +159,7 @@ async def cb_start_quiz_menu(callback: CallbackQuery):
         parse_mode="Markdown"
     )
 
-# --- АДМІН ПАНЕЛЬТА СТАТИСТИКА ---
+# ================= ADMIN HANDLERS =================
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -151,14 +183,50 @@ async def cb_admin_stats(callback: CallbackQuery):
     stats = await DBClient.get_admin_stats()
     
     stats_text = (
-        f"📊 **Точна статистика проекту:**\n\n"
+        f"📊 **Детальна статистика проекту:**\n\n"
         f"👥 Всього користувачів: **{stats['total_users']}**\n"
-        f"👑 З активним Premium: **{stats['premium_users']}**\n"
+        f"🟢 Активні користувачі: **{stats.get('active_users', stats['total_users'])}**\n"
+        f"🚫 Заблокували бота: **{stats.get('blocked_users', 0)}**\n"
+        f"👑 З активним Premium: **{stats['premium_users']}**\n\n"
         f"📚 Питань у базі даних: **{stats['total_questions']}**"
     )
     
     await callback.message.edit_text(
         stats_text,
+        reply_markup=get_admin_keyboard(),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "admin_check_active")
+async def cb_check_active(callback: CallbackQuery, bot: Bot):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.answer("⏳ Розпочинаю аудит активності...")
+    await callback.message.edit_text("🔄 **Іде перевірка заблокованих користувачів... Зачекайте.**")
+
+    user_ids = await DBClient.get_all_user_ids()
+    active_count = 0
+    blocked_count = 0
+
+    for u_id in user_ids:
+        try:
+            # Використовуємо ping без відправки повідомлення користувачеві
+            await bot.send_chat_action(chat_id=u_id, action="typing")
+            await DBClient.set_user_active_status(u_id, True)
+            active_count += 1
+        except (TelegramForbiddenError, TelegramBadRequest):
+            await DBClient.set_user_active_status(u_id, False)
+            blocked_count += 1
+        except Exception as e:
+            logger.error(f"Помилка аудиту для ID {u_id}: {e}")
+            
+        await asyncio.sleep(0.05)
+
+    await callback.message.edit_text(
+        f"✅ **Аудит успішно завершено!**\n\n"
+        f"🟢 Активних: **{active_count}**\n"
+        f"🚫 Заблокували бота: **{blocked_count}**",
         reply_markup=get_admin_keyboard(),
         parse_mode="Markdown"
     )
