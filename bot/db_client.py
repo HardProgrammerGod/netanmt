@@ -3,7 +3,7 @@ import logging
 from datetime import date
 from typing import Dict, Any, List, Optional
 from supabase import create_client, Client
-from config import SUPABASE_URL, SUPABASE_KEY
+from bot.config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
 
