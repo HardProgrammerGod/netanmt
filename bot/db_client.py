@@ -15,18 +15,25 @@ class DBClient:
     """Клас для безпечної взаємодії з БД Supabase через асинхронні обгортки."""
 
     @staticmethod
-    async def get_or_create_user(tg_id: int, username: str, first_name: str) -> Dict[str, Any]:
-        """Асинхронно отримує або створює користувача в БД Supabase."""
+    async def get_or_create_user(tg_id: Optional[int] = None, username: str = "", first_name: str = "", user_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Асинхронно отримує або створює користувача в БД Supabase.
+        Підтримує передачу і tg_id, і user_id для гнучкості.
+        """
+        target_id = tg_id if tg_id is not None else user_id
+        if target_id is None:
+            raise ValueError("Потрібно вказати tg_id або user_id")
+
         today = str(date.today())
 
         def _db_op():
             try:
-                # Перевіряємо наявність користувача
-                res = supabase.table("users").select("*").eq("user_id", int(tg_id)).execute()
+                # Шукаємо користувача по user_id в Supabase
+                res = supabase.table("users").select("*").eq("user_id", int(target_id)).execute()
 
                 if not res.data:
                     new_user = {
-                        "user_id": int(tg_id),
+                        "user_id": int(target_id),
                         "username": username or "",
                         "first_name": first_name or "Учень",
                         "daily_tests_left": 3,
@@ -38,7 +45,7 @@ class DBClient:
                     }
                     
                     insert_res = supabase.table("users").insert(new_user).execute()
-                    logger.info(f"✅ Користувача {tg_id} успішно додано в Supabase!")
+                    logger.info(f"✅ Користувача {target_id} успішно додано в Supabase!")
 
                     # Спроба оновити загальну статистику
                     try:
@@ -54,12 +61,12 @@ class DBClient:
                 user = res.data[0]
                 updates = {}
 
-                # Відновлення активності, якщо користувач повернувся
+                # Відновлення активності
                 if not user.get("is_active", True):
                     updates["is_active"] = True
                     user["is_active"] = True
 
-                # Скидання денного ліміту тестувань при настанні нового дня
+                # Скидання денного ліміту
                 if user.get("last_test_date") != today:
                     updates["daily_tests_left"] = 3
                     updates["last_test_date"] = today
@@ -67,14 +74,14 @@ class DBClient:
                     user["last_test_date"] = today
 
                 if updates:
-                    supabase.table("users").update(updates).eq("user_id", int(tg_id)).execute()
+                    supabase.table("users").update(updates).eq("user_id", int(target_id)).execute()
 
                 return user
 
             except Exception as e:
-                logger.error(f"❌ Помилка в get_or_create_user для {tg_id}: {e}", exc_info=True)
+                logger.error(f"❌ Помилка в get_or_create_user для {target_id}: {e}", exc_info=True)
                 return {
-                    "user_id": int(tg_id),
+                    "user_id": int(target_id),
                     "username": username or "",
                     "first_name": first_name or "Учень",
                     "daily_tests_left": 3,
