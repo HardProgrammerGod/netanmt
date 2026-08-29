@@ -4,7 +4,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def get_main_keyboard(web_app_url: str = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
-    builder.button(text="🚀 Розпочати тест (Duolingo Style)", callback_data="start_quiz_menu")
+    builder.button(text="🚀 Розпочати тест)", callback_data="start_quiz_menu")
     builder.button(text="🔥 Мій Стрік & Профіль", callback_data="show_profile")
     builder.button(text="🎁 Запросити друга (+Premium)", callback_data="show_referral")
     builder.button(text="👑 Premium / Школа NMT", callback_data="show_tariffs")
