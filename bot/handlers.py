@@ -1,250 +1,188 @@
 import logging
-from aiogram import Router, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
+from aiogram import Router, types, F
+from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.keyboards import (
-    get_main_reply_keyboard, 
-    get_premium_payment_kb,
-    roadmap_kb, 
-    topic_action_kb, 
-    test_answers_kb
-)
 from bot.db_client import DBClient
+from bot.keyboards import (
+    get_main_keyboard, 
+    get_difficulty_keyboard, 
+    get_quiz_options_keyboard,
+    get_explanation_keyboard
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="main_router")
 
-# --- FSM Стан для тестування ---
-class QuizStates(StatesGroup):
+class QuizFSM(StatesGroup):
     in_quiz = State()
 
-# --- Головне меню та Навігація ---
-
+# ================= COMMAND /START =================
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
+async def cmd_start(message: types.Message, command: CommandObject, state: FSMContext):
     await state.clear()
+    user_id = message.from_user.id
     
-    args = message.text.split()
-    referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+    # Витягуємо ID реферера з аргументів /start ref_123456
+    referrer_id = None
+    if command.args and command.args.startswith("ref_"):
+        try:
+            referrer_id = int(command.args.replace("ref_", ""))
+        except ValueError:
+            pass
 
-    user, is_new = DBClient.get_or_create_user(
-        user_id=message.from_user.id,
-        username=message.from_user.username or "",
-        first_name=message.from_user.first_name or "",
+    user = DBClient.get_or_create_user(
+        user_id=user_id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
         referrer_id=referrer_id
     )
+
+    welcome_text = (
+        f"Привіт, <b>{message.from_user.first_name}</b>! 👋\n\n"
+        f"Вітаю в тренажері підготовки до **НМТ з англійської** у стилі Duolingo! ⚡️\n\n"
+        f"🔥 Твій поточний стрік: <b>{user.get('streak', 1)} днів</b>\n"
+        f"🏆 Твої бали (XP): <b>{user.get('xp', 0)}</b>\n\n"
+        f"Обирай розділ у меню нижче та прокачуй свій бал до 190+!"
+    )
+    
+    await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+# ================= MENU HANDLERS =================
+@router.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    user = DBClient.get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     
     welcome_text = (
-        f"Вітаю, {message.from_user.first_name}! 👋\n\n"
-        "Це твій інтерактивний тренажер підготовки до НМТ з англійської мови.\n"
-        "Обирай розділ у меню нижче та розпочинай підготовку!"
+        f"Головне меню 🎯\n\n"
+        f"🔥 Стрік: <b>{user.get('streak', 1)} днів</b> | 🏆 XP: <b>{user.get('xp', 0)}</b>"
     )
-    if is_new and referrer_id:
-        welcome_text += "\n\n🎁 **Ви зареєструвалися за реферальним посиланням!**"
+    await callback.message.edit_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-    await message.answer(welcome_text, reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
-
-@router.message(F.text == "👤 Профіль")
-async def show_profile(message: Message):
-    user, _ = DBClient.get_or_create_user(
-        user_id=message.from_user.id,
-        username=message.from_user.username or "",
-        first_name=message.from_user.first_name or ""
+@router.callback_query(F.data == "start_quiz_menu")
+async def show_difficulty_menu(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "Обери рівень складності тренування:\n\n"
+        "🟢 <b>Рівень 1</b>: Легкий розігрів (A1-A2) — для швидкої впевненості\n"
+        "🟡 <b>Рівень 2</b>: Пастки НМТ (B1) — типові помилки випускників\n"
+        "🔴 <b>Рівень 3</b>: Хардкор (B2) — складні граматичні конструкції",
+        reply_markup=get_difficulty_keyboard(),
+        parse_mode="HTML"
     )
-    if not user:
-        await message.answer("⚠️ Не вдалося завантажити дані профілю.")
-        return
 
-    status = "⭐ Premium (Безлімітна енергія)" if user.get("is_premium") else "👤 Звичайний"
-    energy_val = "♾️" if user.get("is_premium") else f"{user.get('energy', 0)}/5"
-    bot_username = (await message.bot.get_me()).username
-    ref_link = f"https://t.me/{bot_username}?start={message.from_user.id}"
-
-    profile_text = (
-        f"📊 **Твій Особистий Профіль:**\n\n"
-        f"👤 Ім'я: **{user.get('first_name', '')}**\n"
-        f"Статус: **{status}**\n"
-        f"⚡ Енергія: **{energy_val}**\n"
-        f"🏆 Набрано XP: **{user.get('xp', 0)}**\n\n"
-        f"🔗 **Твоє реферальне посилання:**\n`{ref_link}`\n"
-        f"_(Отримуй +100 XP за кожного запрошеного друга!)_"
-    )
-    await message.answer(profile_text, parse_mode="Markdown")
-
-@router.message(F.text == "🗺 Карта навчання")
-async def show_roadmap_cmd(message: Message):
-    roadmap = DBClient.get_user_roadmap(message.from_user.id)
-    if not roadmap:
-        await message.answer("Розділи навчання зараз наповнюються. Завітайте трохи пізніше!")
-        return
-    await message.answer("🗺 **Твоя карта навчання НМТ:**", reply_markup=roadmap_kb(roadmap), parse_mode="Markdown")
-
-@router.callback_query(F.data == "show_roadmap")
-async def show_roadmap_cb(query: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await query.answer()
-    roadmap = DBClient.get_user_roadmap(query.from_user.id)
-    await query.message.edit_text("🗺 **Твоя карта навчання НМТ:**", reply_markup=roadmap_kb(roadmap), parse_mode="Markdown")
-
-@router.callback_query(F.data.startswith("select_topic_"))
-async def select_topic(query: CallbackQuery):
-    await query.answer()
-    topic_id = query.data.replace("select_topic_", "")
-    roadmap = DBClient.get_user_roadmap(query.from_user.id)
-    topic = next((t for t in roadmap if str(t["id"]) == str(topic_id)), None)
+# ================= QUIZ LOGIC =================
+@router.callback_query(F.data.startswith("quiz_diff_"))
+async def start_quiz_by_diff(callback: types.CallbackQuery, state: FSMContext):
+    difficulty = int(callback.data.split("_")[-1])
+    questions = DBClient.get_questions_by_difficulty(difficulty=difficulty, limit=10)
     
-    if not topic:
-        await query.message.answer("Розділ не знайдено.")
-        return
-
-    text = f"Розділ: **{topic['title']}**\n\nОбери необхідну дію:"
-    await query.message.edit_text(text, parse_mode="Markdown", reply_markup=topic_action_kb(topic_id, topic["is_unlocked"]))
-
-@router.message(F.text == "🏆 Лідерборд")
-async def show_leaderboard(message: Message):
-    leaders = DBClient.get_leaderboard()
-    if not leaders:
-        await message.answer("🏆 Лідерборд поки порожній. Будь першим!")
-        return
-
-    text = "🏆 **Топ-10 студентів тижня:**\n\n"
-    for idx, l in enumerate(leaders, 1):
-        name = l.get("first_name") or l.get("username") or "Студент"
-        text += f"{idx}. **{name}** — {l.get('xp', 0)} XP\n"
-
-    await message.answer(text, parse_mode="Markdown")
-
-# --- Логіка Тестування (FSM Engine) ---
-
-@router.callback_query(F.data.startswith(("start_learn_", "start_skip_")))
-async def start_quiz(query: CallbackQuery, state: FSMContext):
-    await query.answer()
-    topic_id = query.data.split("_")[-1]
-    questions = DBClient.get_test_questions(topic_id=topic_id, limit=5)
-
     if not questions:
-        await query.message.edit_text(
-            "⚠️ У цій темі ще немає питань. Адміністратор скоро їх додасть!",
-            reply_markup=roadmap_kb(DBClient.get_user_roadmap(query.from_user.id))
-        )
+        await callback.answer("⚠️ Наразі питань цього рівня немає в базі. Спробуй інший!", show_alert=True)
         return
 
-    await state.set_state(QuizStates.in_quiz)
-    await state.update_data(
-        questions=questions,
-        current_index=0,
-        correct_count=0,
-        topic_id=topic_id
-    )
+    await state.set_state(QuizFSM.in_quiz)
+    await state.update_data(questions=questions, current_index=0, difficulty=difficulty)
+    
+    await send_next_question(callback.message, state)
 
-    await send_next_question(query.message, state)
-
-async def send_next_question(message: Message, state: FSMContext):
+async def send_next_question(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    q_index = data["current_index"]
-    questions = data["questions"]
+    questions = data.get("questions", [])
+    index = data.get("current_index", 0)
 
-    if q_index >= len(questions):
-        correct = data["correct_count"]
-        total = len(questions)
-        topic_id = data["topic_id"]
-        user_id = message.chat.id
-
-        is_passed = (correct / total) >= 0.6
-
-        if is_passed:
-            DBClient.unlock_topic(user_id, topic_id)
-            res_text = f"🎉 **Вітаємо! Тест складено!**\n\nРезультат: **{correct}/{total}**\nТему успішно зараховано!"
-        else:
-            res_text = f"❌ **Тест не складено.**\n\nРезультат: **{correct}/{total}**\nСпробуйте ще раз, щоб відкрити наступні теми."
-
+    if index >= len(questions):
         await state.clear()
-        await message.edit_text(
-            res_text, 
-            parse_mode="Markdown", 
-            reply_markup=roadmap_kb(DBClient.get_user_roadmap(user_id))
+        user = DBClient.get_or_create_user(message.chat.id, message.chat.from_user.username, message.chat.from_user.first_name)
+        await message.answer(
+            f"🎉 <b>Вітаємо! Сесію завершено!</b>\n\n"
+            f"Ти пройшов блок питань. Твій загальний результат: <b>{user.get('xp', 0)} XP</b>.\n"
+            f"Не зупиняйся, підтримуй свій щоденний стрік! 🔥",
+            reply_markup=get_main_keyboard(),
+            parse_mode="HTML"
         )
         return
 
-    q = questions[q_index]
-    text = f"❓ **Питання {q_index + 1}/{len(questions)}:**\n\n{q['question_text']}"
+    q = questions[index]
+    text = f"<b>Питання {index + 1}/{len(questions)}:</b>\n\n{q['question_text']}"
     
-    await message.edit_text(
-        text, 
-        parse_mode="Markdown", 
-        reply_markup=test_answers_kb(q['options'], str(q['id']))
-    )
+    kb = get_quiz_options_keyboard(question_id=q["id"], options=q["options"])
+    
+    if message.text:
+        await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
-@router.callback_query(QuizStates.in_quiz, F.data.startswith("ans_"))
-async def handle_quiz_answer(query: CallbackQuery, state: FSMContext):
-    selected_option = int(query.data.split("_")[1])
-    data = await state.get_data()
-    
-    q_index = data["current_index"]
-    q = data["questions"][q_index]
-    
+@router.callback_query(QuizFSM.in_quiz, F.data.startswith("answer_"))
+async def handle_answer(callback: types.CallbackQuery, state: FSMContext):
+    _, q_id_str, opt_idx_str = callback.data.split("_")
+    q_id = int(q_id_str)
+    selected_option = int(opt_idx_str)
+
+    q = DBClient.get_question_by_id(q_id)
+    if not q:
+        await callback.answer("Помилка отримання питання.", show_alert=True)
+        return
+
+    user = DBClient.get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     is_correct = (selected_option == q["correct_option"])
-    DBClient.record_answer(query.from_user.id, str(q["id"]), is_correct)
-    
-    correct_count = data["correct_count"] + (1 if is_correct else 0)
-    
+    is_premium = user.get("is_premium", False)
+
+    data = await state.get_data()
+    await state.update_data(current_index=data.get("current_index", 0) + 1)
+
     if is_correct:
-        await query.answer("✅ Правильно! +15 XP", show_alert=False)
+        DBClient.add_xp(callback.from_user.id, amount=10)
+        res_text = "✅ <b>Правильно! +10 XP</b> 🎉\n\n"
+        if q.get("explanation"):
+            res_text += f"💡 <i>{q['explanation']}</i>"
     else:
-        correct_ans_text = q['options'][q['correct_option']]
-        await query.answer(f"❌ Неправильно. Правильна відповідь: {correct_ans_text}", show_alert=True)
+        res_text = f"❌ <b>Неправильно!</b>\nПравильна відповідь: <b>{q['options'][q['correct_option']]}</b>\n\n"
+        if is_premium and q.get("explanation"):
+            res_text += f"💡 <b>Пояснення від викладача:</b>\n{q['explanation']}"
+        else:
+            res_text += "🔒 <i>Повне розширене пояснення та відео-розбір доступні у Premium / Школі!</i>"
 
-    await state.update_data(
-        current_index=q_index + 1,
-        correct_count=correct_count
+    await callback.message.edit_text(
+        res_text,
+        reply_markup=get_explanation_keyboard(is_premium=is_premium),
+        parse_mode="HTML"
     )
 
-    await send_next_question(query.message, state)
+@router.callback_query(QuizFSM.in_quiz, F.data == "next_question")
+async def next_question_callback(callback: types.CallbackQuery, state: FSMContext):
+    await send_next_question(callback.message, state)
 
-# --- Придбання Premium (Stars & Direct Card) ---
+# ================= REFERRAL & TARIFFS =================
+@router.callback_query(F.data == "show_referral")
+async def show_referral(callback: types.CallbackQuery):
+    bot_info = await callback.bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{callback.from_user.id}"
+    
+    user = DBClient.get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    ref_count = user.get("referrals_count", 0)
 
-@router.message(F.text.contains("Premium"))
-async def show_premium_options(message: Message):
     text = (
-        "⭐ **Придбай Premium-доступ до НМТ Англійська:**\n\n"
-        "• Повний доступ до всіх тем та розборів\n"
-        "• Безлімітна енергія без очікування\n"
-        "• Бонусні XP та пріоритет у лідерборді\n\n"
-        "Обирай зручний спосіб оплати нижче:"
+        f"🎁 <b>Запрошуй друзів — отримуй Premium безкоштовно!</b>\n\n"
+        f"Твоє реферальне посилання:\n<code>{ref_link}</code>\n\n"
+        f"👥 Запрошено друзів: <b>{ref_count}</b>\n"
+        f"💡 <i>За кожні 2 запрошених друзів ти отримуєш безкоштовний доступ до Premium-пояснень!</i>"
     )
-    await message.answer(text, reply_markup=get_premium_payment_kb(), parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-@router.callback_query(F.data == "buy_premium_stars")
-async def send_stars_invoice(query: CallbackQuery):
-    await query.answer()
-    
-    # Створюємо рахунок в Telegram Stars (валюта XTR)
-    prices = [LabeledPrice(label="Premium Доступ", amount=250)]
-    
-    await query.message.answer_invoice(
-        title="⭐ НМТ English Premium",
-        description="Безлімітна енергія + доступ до всіх матеріалів підготовки!",
-        provider_token="",  # Для Stars залишаємо ПУСТТИМ!
-        currency="XTR",
-        prices=prices,
-        start_parameter="premium-stars-buy",
-        payload=f"premium_stars_{query.from_user.id}"
+@router.callback_query(F.data == "show_tariffs")
+async def show_tariffs(callback: types.CallbackQuery):
+    text = (
+        "👑 <b>Тарифи підготовки до НМТ з англійської:</b>\n\n"
+        "1️⃣ <b>PREMIUM (199 грн/міс)</b>\n"
+        "• Пояснення та розбори до ВСІХ складних питань\n"
+        "• Симулятори НМТ на час\n"
+        "• Доступ до інтерактивних автовебінарів\n\n"
+        "2️⃣ <b>ШКОЛА FULL (990 грн/міс)</b>\n"
+        "• Все, що входить у Premium\n"
+        "• Закритий чат із викладачем/ментором\n"
+        "• 2 живих вебінари на тиждень + перевірка домашніх\n\n"
+        "Для покупки або консультації тисни кнопку нижче або пиши адміну!"
     )
-
-@router.pre_checkout_query()
-async def process_pre_checkout(pre_checkout: PreCheckoutQuery):
-    await pre_checkout.answer(ok=True)
-
-@router.message(F.successful_payment)
-async def process_successful_payment(message: Message):
-    success = DBClient.set_premium(message.from_user.id)
-    if success:
-        await message.answer(
-            "🎉 **Вітаємо! Оплата пройшла успішно!**\n\nВам надано **Premium-доступ**. Обмеження по енергії знято!",
-            parse_mode="Markdown"
-        )
-    else:
-        await message.answer("⚠️ Оплата отримана, але сталася помилка оновлення БД. Зверніться до підтримки.")
+    await callback.message.edit_text(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
