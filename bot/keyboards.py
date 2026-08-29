@@ -57,6 +57,7 @@ def get_difficulty_keyboard() -> InlineKeyboardMarkup:
 def get_admin_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Точна статистика", callback_data="admin_stats")
+    builder.button(text="🔍 Перевірити активних (Audit)", callback_data="admin_check_active")
     builder.button(text="⬅️ Головне меню", callback_data="back_to_main")
     builder.adjust(1)
     return builder.as_markup()
