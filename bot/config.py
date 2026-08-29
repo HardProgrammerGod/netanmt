@@ -23,6 +23,3 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("❌ Налаштування Supabase відсутні у змінних оточення!")
 
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
-
-
-WEB_APP_URL = os.getenv("WEB_APP_URL", "")
