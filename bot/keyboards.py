@@ -1,4 +1,5 @@
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
+import urllib.parse
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -6,9 +7,31 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     builder.button(text="🗺 Карта навчання")
     builder.button(text="👤 Профіль")
     builder.button(text="🏆 Лідерборд")
-    builder.button(text="⭐ Купити Premium (Карткою)")
+    builder.button(text="⭐ Купити Premium")
     builder.adjust(2, 2)
     return builder.as_markup(resize_keyboard=True, persistent=True)
+
+def get_premium_payment_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    
+    # 1. Кнопка інвойсу для Зірок (250 Stars)
+    builder.button(
+        text="⭐ Оплатити 250 Stars (270 грн)", 
+        callback_data="buy_premium_stars"
+    )
+    
+    # 2. Формуємо посилання tg://msg_url з готовим текстом
+    msg_text = "Привіт, хочу купити преміум в боті картою!"
+    encoded_text = urllib.parse.quote(msg_text)
+    manager_url = f"https://t.me/nnopkam?text={encoded_text}"
+    
+    builder.button(
+        text="💳 Картка (знижка -27% — 200 грн)", 
+        url=manager_url
+    )
+    
+    builder.adjust(1)
+    return builder.as_markup()
 
 def roadmap_kb(roadmap: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -45,7 +68,6 @@ def topic_action_kb(topic_id: str, is_unlocked: bool) -> InlineKeyboardMarkup:
 def test_answers_kb(options: list, question_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for idx, option in enumerate(options):
-        # Передаємо індекс обраного варіанту відповіді
         builder.button(text=f"{idx + 1}. {option}", callback_data=f"ans_{idx}")
     builder.adjust(1)
     return builder.as_markup()
