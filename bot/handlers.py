@@ -4,17 +4,15 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from bot.keyboards import get_premium_plans_kb, get_payment_link_kb
-from bot.payments import generate_wayforpay_link
 
 from bot.keyboards import (
     get_main_reply_keyboard, 
+    get_premium_payment_kb,
     roadmap_kb, 
     topic_action_kb, 
     test_answers_kb
 )
 from bot.db_client import DBClient
-from bot.config import PAYMENT_PROVIDER_TOKEN
 
 logger = logging.getLogger(__name__)
 router = Router(name="main_router")
@@ -29,7 +27,6 @@ class QuizStates(StatesGroup):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     
-    # Витягуємо ID реферала, якщо посилання було /start 12345678
     args = message.text.split()
     referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
 
@@ -151,13 +148,12 @@ async def send_next_question(message: Message, state: FSMContext):
     questions = data["questions"]
 
     if q_index >= len(questions):
-        # Тест завершено
         correct = data["correct_count"]
         total = len(questions)
         topic_id = data["topic_id"]
         user_id = message.chat.id
 
-        is_passed = (correct / total) >= 0.6  # Прохідний бал 60%
+        is_passed = (correct / total) >= 0.6
 
         if is_passed:
             DBClient.unlock_topic(user_id, topic_id)
@@ -191,13 +187,10 @@ async def handle_quiz_answer(query: CallbackQuery, state: FSMContext):
     q = data["questions"][q_index]
     
     is_correct = (selected_option == q["correct_option"])
-    
-    # Записуємо відповідь у БД та нараховуємо XP
     DBClient.record_answer(query.from_user.id, str(q["id"]), is_correct)
     
     correct_count = data["correct_count"] + (1 if is_correct else 0)
     
-    # Фідбек користувачу
     if is_correct:
         await query.answer("✅ Правильно! +15 XP", show_alert=False)
     else:
@@ -211,24 +204,34 @@ async def handle_quiz_answer(query: CallbackQuery, state: FSMContext):
 
     await send_next_question(query.message, state)
 
-# --- Інтеграція Оплати Картками ---
+# --- Придбання Premium (Stars & Direct Card) ---
 
-@router.message(F.text == "⭐ Купити Premium (Карткою)")
-async def send_payment_invoice(message: Message):
-    if not PAYMENT_PROVIDER_TOKEN:
-        await message.answer("⚠️ Оплата тимчасово недоступна (платіжний шлюз налаштовується).")
-        return
+@router.message(F.text.contains("Premium"))
+async def show_premium_options(message: Message):
+    text = (
+        "⭐ **Придбай Premium-доступ до НМТ Англійська:**\n\n"
+        "• Повний доступ до всіх тем та розборів\n"
+        "• Безлімітна енергія без очікування\n"
+        "• Бонусні XP та пріоритет у лідерборді\n\n"
+        "Обирай зручний спосіб оплати нижче:"
+    )
+    await message.answer(text, reply_markup=get_premium_payment_kb(), parse_mode="Markdown")
 
-    prices = [LabeledPrice(label="НМТ English Premium Access", amount=19900)] # 199.00 UAH
-
-    await message.answer_invoice(
-        title="НМТ English Premium",
-        description="Повний безлімітний доступ до всіх тем, зняття обмежень по енергії + бонусні XP!",
-        provider_token=PAYMENT_PROVIDER_TOKEN,
-        currency="UAH",
+@router.callback_query(F.data == "buy_premium_stars")
+async def send_stars_invoice(query: CallbackQuery):
+    await query.answer()
+    
+    # Створюємо рахунок в Telegram Stars (валюта XTR)
+    prices = [LabeledPrice(label="Premium Доступ", amount=250)]
+    
+    await query.message.answer_invoice(
+        title="⭐ НМТ English Premium",
+        description="Безлімітна енергія + доступ до всіх матеріалів підготовки!",
+        provider_token="",  # Для Stars залишаємо ПУСТТИМ!
+        currency="XTR",
         prices=prices,
-        start_parameter="nmt-premium-buy",
-        payload=f"premium_buy_{message.from_user.id}"
+        start_parameter="premium-stars-buy",
+        payload=f"premium_stars_{query.from_user.id}"
     )
 
 @router.pre_checkout_query()
@@ -245,25 +248,3 @@ async def process_successful_payment(message: Message):
         )
     else:
         await message.answer("⚠️ Оплата отримана, але сталася помилка оновлення БД. Зверніться до підтримки.")
-
-@router.message(F.text.contains("Premium"))
-async def show_premium_options(message: Message):
-    text = (
-        "⭐ **Обери тариф підготовки до НМТ:**\n\n"
-        "• **1 місяць (399 грн)** — повний доступ до всіх тем та тестів на 30 днів.\n"
-        "• **Вся підготовка (1699 грн)** — доступ до кінця складання НМТ без обмежень!\n\n"
-        "Оплата здійснюється безпечно через WayForPay (картка, Apple Pay, Google Pay)."
-    )
-    await message.answer(text, reply_markup=get_premium_plans_kb(), parse_mode="Markdown")
-
-@router.callback_query(F.data.startswith("buy_plan_"))
-async def process_buy_plan(query: CallbackQuery):
-    await query.answer()
-    plan_type = query.data.replace("buy_plan_", "") # 'month' або 'full'
-    
-    pay_url = generate_wayforpay_link(query.from_user.id, plan_type)
-    
-    plan_name = "1 місяць (399 грн)" if plan_type == "month" else "Вся підготовка (1699 грн)"
-    text = f"💳 **Оформлення підписки:** {plan_name}\n\nНатисніть кнопку нижче для переходу на захищену сторінку оплати WayForPay:"
-    
-    await query.message.edit_text(text, reply_markup=get_payment_link_kb(pay_url), parse_mode="Markdown")
