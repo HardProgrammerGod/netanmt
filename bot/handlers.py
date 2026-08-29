@@ -41,7 +41,7 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
 
     welcome_text = (
         f"Привіт, <b>{message.from_user.first_name}</b>! 👋\n\n"
-        f"Вітаю в тренажері підготовки до **НМТ з англійської** у стилі Duolingo! ⚡️\n\n"
+        f"Вітаю в тренажері підготовки до НМТ з англійської! ⚡️\n\n"
         f"🔥 Твій поточний стрік: <b>{user.get('streak', 1)} днів</b>\n"
         f"🏆 Твої бали (XP): <b>{user.get('xp', 0)}</b>\n\n"
         f"Обирай розділ у меню нижче та прокачуй свій бал до 190+!"
