@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppProperty
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 def get_main_keyboard(web_app_url: str = None) -> InlineKeyboardMarkup:
@@ -10,7 +10,7 @@ def get_main_keyboard(web_app_url: str = None) -> InlineKeyboardMarkup:
     builder.button(text="👑 Premium / Школа NMT", callback_data="show_tariffs")
     
     if web_app_url:
-        builder.button(text="🌐 Навчальна Платформа (WebApp)", web_app=WebAppProperty(url=web_app_url))
+        builder.button(text="🌐 Навчальна Платформа (WebApp)", web_app=WebAppInfo(url=web_app_url))
 
     builder.adjust(1)
     return builder.as_markup()
