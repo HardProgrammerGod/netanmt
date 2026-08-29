@@ -17,10 +17,13 @@ class DBClient:
         first_name: Optional[str] = "", 
         referrer_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Отримує користувача або створює нового з реферальною системою."""
+        """Отримує користувача або створює нового/оновлює статус активності."""
         try:
             res = cls.supabase.table("users").select("*").eq("user_id", user_id).execute()
             if res.data and len(res.data) > 0:
+                # Якщо користувач повернувся, робимо його знову активним
+                if not res.data[0].get("is_active", True):
+                    cls.supabase.table("users").update({"is_active": True}).eq("user_id", user_id).execute()
                 return res.data[0]
 
             # Створення нового користувача
@@ -31,12 +34,12 @@ class DBClient:
                 "streak": 1,
                 "xp": 0,
                 "is_premium": False,
+                "is_active": True,
                 "referred_by": referrer_id if (referrer_id and referrer_id != user_id) else None,
                 "referrals_count": 0
             }
             inserted = cls.supabase.table("users").insert(new_user).execute()
             
-            # Якщо є реферер — зараховуємо йому реферала
             if referrer_id and referrer_id != user_id:
                 cls._process_referral(referrer_id)
 
@@ -50,12 +53,13 @@ class DBClient:
                 "streak": 1, 
                 "xp": 0, 
                 "is_premium": False,
+                "is_active": True,
                 "referrals_count": 0
             }
 
     @classmethod
     def _process_referral(cls, referrer_id: int):
-        """Збільшує лічильник рефералів рефереру та відкриває Premium за кожні 2 друзів."""
+        """Обробка реферальної системи."""
         try:
             res = cls.supabase.table("users").select("*").eq("user_id", referrer_id).execute()
             if not res.data:
@@ -76,30 +80,47 @@ class DBClient:
             logger.error(f"Помилка в _process_referral: {e}", exc_info=True)
 
     @classmethod
-    async def add_xp(cls, user_id: int, amount: int = 10):
-        """Додає XP за правильні відповіді."""
+    async def set_user_active_status(cls, user_id: int, is_active: bool):
+        """Оновлює статус: чи активний користувач, чи заблокував бота."""
         try:
-            res = cls.supabase.table("users").select("xp").eq("user_id", user_id).execute()
-            if res.data:
-                current_xp = res.data[0].get("xp", 0)
-                cls.supabase.table("users").update({"xp": current_xp + amount}).eq("user_id", user_id).execute()
+            cls.supabase.table("users").update({"is_active": is_active}).eq("user_id", user_id).execute()
         except Exception as e:
-            logger.error(f"Помилка add_xp: {e}", exc_info=True)
+            logger.error(f"Помилка set_user_active_status для {user_id}: {e}")
+
+    @classmethod
+    async def get_all_user_ids(cls) -> List[int]:
+        """Отримує список ID усіх користувачів для перевірки/розсилки."""
+        try:
+            res = cls.supabase.table("users").select("user_id").execute()
+            return [row["user_id"] for row in res.data] if res.data else []
+        except Exception as e:
+            logger.error(f"Помилка get_all_user_ids: {e}")
+            return []
 
     # ================= STATS FOR ADMIN =================
     @classmethod
     async def get_admin_stats(cls) -> Dict[str, int]:
-        """Повертає точну статистику бота для адмін-панелі."""
-        stats = {"total_users": 0, "premium_users": 0, "total_questions": 0}
+        """Отримує точні дані про користувачів без помилок підрахунку."""
+        stats = {
+            "total_users": 0, 
+            "active_users": 0, 
+            "blocked_users": 0, 
+            "premium_users": 0, 
+            "total_questions": 0
+        }
         try:
-            users_res = cls.supabase.table("users").select("user_id", count="exact").execute()
-            stats["total_users"] = users_res.count if users_res.count is not None else len(users_res.data or [])
+            # Отримуємо всіх користувачів для точного мануального підрахунку
+            users_res = cls.supabase.table("users").select("user_id, is_premium, is_active").execute()
+            users_data = users_res.data or []
 
-            premium_res = cls.supabase.table("users").select("user_id", count="exact").eq("is_premium", True).execute()
-            stats["premium_users"] = premium_res.count if premium_res.count is not None else len(premium_res.data or [])
+            stats["total_users"] = len(users_data)
+            stats["premium_users"] = sum(1 for u in users_data if u.get("is_premium"))
+            stats["active_users"] = sum(1 for u in users_data if u.get("is_active", True))
+            stats["blocked_users"] = stats["total_users"] - stats["active_users"]
 
-            q_res = cls.supabase.table("questions").select("id", count="exact").execute()
-            stats["total_questions"] = q_res.count if q_res.count is not None else len(q_res.data or [])
+            # Кількість питань
+            q_res = cls.supabase.table("questions").select("id").execute()
+            stats["total_questions"] = len(q_res.data or [])
         except Exception as e:
             logger.error(f"Помилка при отриманні адмін-статистики: {e}", exc_info=True)
         return stats
@@ -107,7 +128,6 @@ class DBClient:
     # ================= QUESTIONS MANAGEMENT =================
     @classmethod
     async def add_question(cls, topic: str, difficulty: int, question_text: str, options: list, correct_option: int, explanation: str = "") -> bool:
-        """Додає питання в базу даних."""
         try:
             payload = {
                 "topic": topic,
@@ -122,23 +142,3 @@ class DBClient:
         except Exception as e:
             logger.error(f"Помилка add_question: {e}", exc_info=True)
             return False
-
-    @classmethod
-    async def get_questions_by_difficulty(cls, difficulty: int, limit: int = 10) -> List[Dict[str, Any]]:
-        """Отримує питання за рівнем складності."""
-        try:
-            res = cls.supabase.table("questions").select("*").eq("difficulty", difficulty).limit(limit).execute()
-            return res.data or []
-        except Exception as e:
-            logger.error(f"Помилка get_questions_by_difficulty: {e}", exc_info=True)
-            return []
-
-    @classmethod
-    async def get_question_by_id(cls, question_id: int) -> Optional[Dict[str, Any]]:
-        """Отримує конкретне питання за ID."""
-        try:
-            res = cls.supabase.table("questions").select("*").eq("id", question_id).execute()
-            return res.data[0] if res.data else None
-        except Exception as e:
-            logger.error(f"Помилка get_question_by_id: {e}", exc_info=True)
-            return None
