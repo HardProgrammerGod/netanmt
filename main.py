@@ -20,52 +20,6 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 
-# --- Webhook для прийому платежів від WayForPay ---
-async def handle_wayforpay_callback(request):
-    try:
-        data = await request.json()
-        logger.info(f"Отримано сповіщення від WayForPay: {data}")
-
-        if verify_wayforpay_response(data):
-            if data.get("transactionStatus") == "Approved":
-                order_ref = data.get("orderReference", "") # order_123456789_month_1700000000
-                parts = order_ref.split("_")
-                
-                if len(parts) >= 3:
-                    user_id = int(parts[1])
-                    plan_type = parts[2]
-                    
-                    # Активуємо Premium в БД
-                    DBClient.set_premium(user_id)
-                    
-                    # Повідомляємо юзера в Telegram
-                    try:
-                        await bot.send_message(
-                            user_id, 
-                            "🎉 **Дякуємо за оплату!**\n\nВаш **Premium-доступ** успішно активовано. Всі обмеження знято, приємного навчання!",
-                            parse_mode="Markdown"
-                        )
-                    except Exception as send_err:
-                        logger.error(f"Не вдалося надіслати повідомлення юзеру {user_id}: {send_err}")
-
-                # Формуємо відповідь для WayForPay
-                time_stamp = int(time.time())
-                sign_str = f"{order_ref};accept;{time_stamp}"
-                sign = hmac.new(WAYFORPAY_SECRET_KEY.encode('utf-8'), sign_str.encode('utf-8'), hashlib.md5).hexdigest()
-                
-                response_data = {
-                    "orderReference": order_ref,
-                    "status": "accept",
-                    "time": time_stamp,
-                    "signature": sign
-                }
-                return web.json_response(response_data)
-
-        return web.json_response({"status": "error", "message": "Invalid signature"}, status=400)
-    except Exception as e:
-        logger.error(f"Помилка обробки WayForPay callback: {e}")
-        return web.json_response({"status": "error"}, status=500)
-
 async def handle_ping(request):
     return web.Response(text="NMT Bot Service Active 🚀", status=200)
 
@@ -73,7 +27,6 @@ async def start_healthcheck():
     app = web.Application()
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
-    app.router.add_post("/wayforpay/callback", handle_wayforpay_callback)
     
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
