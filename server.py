@@ -21,11 +21,9 @@ from bot.services.wayforpay import verify_callback_signature, create_payment_lin
 
 logging.basicConfig(level=logging.INFO)
 
-# Параметри продукту з оточення (з дефолтними значеннями)
 PRODUCT_PRICE = float(os.getenv("PRODUCT_PRICE", "100.0"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Доступ до матеріалів")
 
-# Ініціалізація клієнтів
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -35,17 +33,17 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обробка /start та створення/оновлення користувача в БД."""
     user_id = message.from_user.id
 
     try:
+        # Виправлено: використовуємо `id` замість `telegram_id`
         supabase.table("users").upsert(
             {
-                "telegram_id": user_id,
+                "id": user_id,
                 "username": message.from_user.username,
                 "first_name": message.from_user.first_name,
             },
-            on_conflict="telegram_id",
+            on_conflict="id",
         ).execute()
     except Exception as e:
         logging.error(f"Помилка створення користувача в Supabase: {e}")
@@ -54,7 +52,7 @@ async def cmd_start(message: types.Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"💳 Придбати доступ ({PRODUCT_PRICE:.0f} UAH)",
+                    text=f"💳 Придбати Premium ({PRODUCT_PRICE:.0f} UAH)",
                     callback_data="buy_access",
                 )
             ]
@@ -68,16 +66,15 @@ async def cmd_start(message: types.Message):
 
 @dp.callback_query(lambda c: c.data == "buy_access")
 async def process_buy(callback: types.CallbackQuery):
-    """Формування замовлення та видача посилання на оплату."""
     user_id = callback.from_user.id
     order_id = f"pay_{user_id}_{int(time.time())}"
 
     try:
-        # Запис замовлення зі статусом pending
+        # Виправлено: записуємо user_id відповідно до нової таблиці orders
         supabase.table("orders").insert(
             {
                 "order_id": order_id,
-                "telegram_id": user_id,
+                "user_id": user_id,
                 "amount": PRODUCT_PRICE,
                 "status": "pending",
             }
@@ -107,17 +104,15 @@ async def process_buy(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# --- Lifespan: Керування фоновим ботом разом із FastAPI ---
+# --- Lifespan ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запускаємо polling бота в окремій асинхронній тасці
     polling_task = asyncio.create_task(dp.start_polling(bot))
     logging.info("🚀 Telegram-бот успішно запущений у фоновому режимі")
     
     yield
     
-    # Зупинка бота під час вимкнення сервера
     polling_task.cancel()
     await bot.session.close()
     logging.info("🛑 Сервер та Telegram-бот зупинені")
@@ -130,15 +125,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/payment/callback")
 async def payment_callback(request: Request):
-    """
-    Приймає та перевіряє сповіщення про статус оплати від WayForPay.
-    """
     try:
         data = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON format")
 
-    # 1. Валідація HMAC-підпису
     if not verify_callback_signature(data):
         logging.warning("⚠️ Отримано вебхук з недійсним підписом!")
         raise HTTPException(status_code=400, detail="Invalid signature")
@@ -148,7 +139,6 @@ async def payment_callback(request: Request):
 
     if status == "Approved":
         try:
-            # Отримуємо замовлення з бази
             order_res = (
                 supabase.table("orders")
                 .select("*")
@@ -158,37 +148,34 @@ async def payment_callback(request: Request):
 
             if order_res.data:
                 order = order_res.data[0]
-                telegram_id = order["telegram_id"]
+                user_id = order["user_id"]
 
-                # Перевіряємо, чи не було замовлення вже оброблено раніше
                 if order.get("status") != "paid":
-                    # 2. Оновлюємо статус замовлення
+                    # Оновлюємо статус замовлення
                     supabase.table("orders").update({"status": "paid"}).eq(
                         "order_id", order_id
                     ).execute()
 
-                    # 3. Надаємо доступ користувачу
-                    supabase.table("users").update({"has_access": True}).eq(
-                        "telegram_id", telegram_id
+                    # Виправлено: оновлюємо is_premium замість has_access, ключ 'id'
+                    supabase.table("users").update({"is_premium": True}).eq(
+                        "id", user_id
                     ).execute()
 
-                    # 4. Сповіщаємо користувача в Telegram
                     try:
                         await bot.send_message(
-                            chat_id=telegram_id,
-                            text="🎉 **Оплату успішно підтверджено!**\nВаш доступ активовано.",
+                            chat_id=user_id,
+                            text="🎉 **Оплату успішно підтверджено!**\nВам надано Premium-доступ.",
                             parse_mode="Markdown",
                         )
                     except Exception as send_err:
                         logging.error(
-                            f"Не вдалося надіслати сповіщення юзеру {telegram_id}: {send_err}"
+                            f"Не вдалося надіслати сповіщення юзеру {user_id}: {send_err}"
                         )
 
         except Exception as db_err:
             logging.error(f"Помилка при обробці бази даних у колбеку: {db_err}")
             raise HTTPException(status_code=500, detail="Database error")
 
-        # 5. Генеруємо відповідь-підтвердження для WayForPay (строго за специфікацією)
         time_now = int(time.time())
         sign_str = f"{order_id};ACCEPT;{time_now}"
         response_signature = hmac.new(
