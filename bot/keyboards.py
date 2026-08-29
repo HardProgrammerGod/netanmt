@@ -7,7 +7,7 @@ def get_main_keyboard(web_app_url: str = None) -> InlineKeyboardMarkup:
     builder.button(text="🚀 Розпочати тест)", callback_data="start_quiz_menu")
     builder.button(text="🔥 Мій Стрік & Профіль", callback_data="show_profile")
     builder.button(text="🎁 Запросити друга (+Premium)", callback_data="show_referral")
-    builder.button(text="👑 Premium / Школа NMT", callback_data="show_tariffs")
+    builder.button(text="👑 ТВІЙ ШАНС!", callback_data="show_tariffs")
     
     if web_app_url:
         builder.button(text="🌐 Навчальна Платформа (WebApp)", web_app=WebAppInfo(url=web_app_url))
