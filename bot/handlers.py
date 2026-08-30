@@ -96,16 +96,17 @@ def _correct_letter(
     except (TypeError, ValueError):
         correct = 0
 
-    mapping = {
-        0: "A",
-        1: "B",
-        2: "C",
-        3: "D",
-        1: "B",
-        2: "C",
-        3: "D",
-        4: "D",
-    }
+    letters = (
+        "A",
+        "B",
+        "C",
+        "D",
+    )
+
+    if 0 <= correct <= 3:
+        return letters[correct]
+
+    return "A"
 
     # Database created by this project uses 0-3.
     if correct in {0, 1, 2, 3}:
