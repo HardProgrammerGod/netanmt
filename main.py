@@ -6,7 +6,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import BOT_TOKEN, ADMIN_IDS
-from bot.handlers import router
+from bot.handlers import router as main_router
+from bot.admin import router as admin_router  # Імпортуємо адмін-роутер
 from bot.middlewares import AntiSpamMiddleware
 from bot.db_client import DBClient
 
@@ -39,8 +40,9 @@ async def main():
     dp.message.middleware(antispam_middleware)
     dp.callback_query.middleware(antispam_middleware)
 
-    # Підключення роутера з хендлерами
-    dp.include_router(router)
+    # Підключення роутерів (Адмінський підключаємо першим)
+    dp.include_router(admin_router)
+    dp.include_router(main_router)
 
     # Глобальний обробник помилок
     @dp.error()
