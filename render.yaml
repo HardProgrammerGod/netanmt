@@ -2,18 +2,12 @@ services:
   - type: web
     name: nmt-english-bot
     runtime: python
-    plan: free
 
     buildCommand: pip install -r requirements.txt
 
     startCommand: python main.py
 
-    healthCheckPath: /health
-
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-
       - key: BOT_TOKEN
         sync: false
 
@@ -26,11 +20,9 @@ services:
       - key: ADMIN_IDS
         sync: false
 
-      - key: ADMIN_USERNAME
+      - key: WEBHOOK_BASE_URL
         sync: false
 
-      - key: WEB_APP_URL
-        sync: false
+    healthCheckPath: /health
 
-      - key: WEBHOOK_SECRET
-        sync: false
+    autoDeploy: true
