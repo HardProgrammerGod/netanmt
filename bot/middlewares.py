@@ -1,5 +1,6 @@
 import time
-from typing import Any, Awaitable, Callable, Dict
+from collections import OrderedDict
+from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
@@ -7,52 +8,61 @@ from aiogram.types import CallbackQuery, Message
 
 class AntiSpamMiddleware(BaseMiddleware):
     """
-    Дуже легкий in-memory rate limiter.
+    Lightweight anti-spam protection.
 
-    Не створює Redis-з'єднань і тому підходить для маленького
-    Render instance.
+    Keeps memory bounded so the Render free instance does not
+    accumulate unlimited user IDs.
     """
 
-    def __init__(self, limit: float = 0.7) -> None:
+    def __init__(
+        self,
+        limit: float = 0.7,
+        max_users: int = 5000,
+    ):
         self.limit = limit
-        self.last_time: Dict[int, float] = {}
+        self.max_users = max_users
+        self.last_time: OrderedDict[int, float] = OrderedDict()
 
     async def __call__(
         self,
         handler: Callable[
-            [Message | CallbackQuery, Dict[str, Any]],
+            [Any, dict],
             Awaitable[Any],
         ],
-        event: Message | CallbackQuery,
-        data: Dict[str, Any],
+        event: Any,
+        data: dict,
     ) -> Any:
+
+        if not isinstance(
+            event,
+            (Message, CallbackQuery),
+        ):
+            return await handler(event, data)
+
         if not event.from_user:
             return await handler(event, data)
 
         user_id = event.from_user.id
-        now = time.monotonic()
+        current_time = time.monotonic()
 
-        previous = self.last_time.get(user_id)
+        last_time = self.last_time.get(user_id)
 
-        if previous is not None and now - previous < self.limit:
+        if (
+            last_time is not None
+            and current_time - last_time < self.limit
+        ):
             if isinstance(event, CallbackQuery):
                 await event.answer(
-                    "⏳ Зачекайте секунду.",
+                    "⏳ Зачекай секунду.",
                     show_alert=False,
                 )
 
             return None
 
-        self.last_time[user_id] = now
+        self.last_time[user_id] = current_time
+        self.last_time.move_to_end(user_id)
 
-        # Не даємо словнику рости нескінченно.
-        if len(self.last_time) > 10_000:
-            cutoff = now - 60
-
-            self.last_time = {
-                uid: timestamp
-                for uid, timestamp in self.last_time.items()
-                if timestamp >= cutoff
-            }
+        if len(self.last_time) > self.max_users:
+            self.last_time.popitem(last=False)
 
         return await handler(event, data)
