@@ -1,14 +1,9 @@
 import asyncio
 import logging
-from typing import Any, Optional
-
-from aiogram.types import InlineKeyboardButton
+from typing import Any, Dict, List, Optional
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import CommandStart
 from aiogram.types import (
     CallbackQuery,
     LabeledPrice,
@@ -18,22 +13,26 @@ from aiogram.types import (
 
 from bot.config import (
     ADMIN_IDS,
-    EXPRESS_TEST_LENGTH,
-    FREE_DAILY_TESTS,
+    CATEGORY_PERSONALIZED,
+    CATEGORY_READING,
+    CATEGORY_USE_OF_ENGLISH,
+    EXPRESS_QUIZ_LENGTH,
+    FREE_DAILY_QUIZ_LIMIT,
     PREMIUM_3_DAYS,
+    PREMIUM_3_DAYS_PRICE,
     PREMIUM_30_DAYS,
-    REFERRAL_PREMIUM_DAYS,
-    STARS_3_DAYS,
-    STARS_30_DAYS,
+    PREMIUM_30_DAYS_PRICE,
+    REGULAR_QUIZ_LENGTH,
     WEB_APP_URL,
 )
 from bot.db_client import DBClient
 from bot.keyboards import (
-    get_answer_keyboard,
+    build_referral_share_url,
     get_main_keyboard,
     get_profile_keyboard,
+    get_question_keyboard,
     get_quiz_categories_keyboard,
-    get_retention_answer_keyboard,
+    get_referral_keyboard,
     get_tariffs_keyboard,
 )
 
@@ -43,110 +42,240 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-class QuizFSM(StatesGroup):
-    mode = State()
-    category = State()
-    tasks = State()
-    current_index = State()
-    score = State()
+# ============================================================
+# HELPERS
+# ============================================================
 
 
-def parse_referrer(message: Message) -> Optional[int]:
-    if not message.text:
-        return None
+def _format_options(
+    question: Dict[str, Any],
+) -> Dict[str, str]:
 
-    parts = message.text.split(maxsplit=1)
+    raw = question.get("options") or {}
 
-    if len(parts) < 2:
-        return None
+    if isinstance(raw, dict):
+        return {
+            "A": str(raw.get("A", "")),
+            "B": str(raw.get("B", "")),
+            "C": str(raw.get("C", "")),
+            "D": str(raw.get("D", "")),
+        }
 
-    parameter = parts[1].strip()
+    if isinstance(raw, list):
+        values = [
+            str(item)
+            for item in raw
+        ]
 
-    if not parameter.startswith("ref_"):
-        return None
+        return {
+            "A": values[0] if len(values) > 0 else "",
+            "B": values[1] if len(values) > 1 else "",
+            "C": values[2] if len(values) > 2 else "",
+            "D": values[3] if len(values) > 3 else "",
+        }
 
-    raw_id = parameter[4:]
+    return {
+        "A": "",
+        "B": "",
+        "C": "",
+        "D": "",
+    }
 
-    if not raw_id.isdigit():
-        return None
 
-    return int(raw_id)
+def _correct_letter(
+    question: Dict[str, Any],
+) -> str:
+
+    correct = question.get(
+        "correct_option",
+        0,
+    )
+
+    try:
+        correct = int(correct)
+    except (TypeError, ValueError):
+        correct = 0
+
+    mapping = {
+        0: "A",
+        1: "B",
+        2: "C",
+        3: "D",
+        1: "B",
+        2: "C",
+        3: "D",
+        4: "D",
+    }
+
+    # Database created by this project uses 0-3.
+    if correct in {0, 1, 2, 3}:
+        return (
+            "A",
+            "B",
+            "C",
+            "D",
+        )[correct]
+
+    return "A"
 
 
-async def send_main_menu(
+def _score_to_200(
+    correct: int,
+    total: int,
+) -> int:
+
+    if total <= 0:
+        return 0
+
+    return round(
+        (correct / total) * 200
+    )
+
+
+async def _send_question(
     message: Message,
-    user_id: int,
-) -> None:
+    question: Dict[str, Any],
+    prefix: str = "quiz_answer",
+):
+
+    options = _format_options(question)
+
+    question_number = question.get(
+        "_number",
+        "",
+    )
+
+    category = question.get(
+        "category",
+        question.get("topic", "НМТ"),
+    )
+
+    text = (
+        f"🧠 <b>{category}</b>\n\n"
+    )
+
+    if question_number:
+        text += (
+            f"Завдання <b>{question_number}</b>\n\n"
+        )
+
+    text += (
+        f"{question.get('question_text', '')}\n\n"
+        "Оберіть відповідь:"
+    )
+
     await message.answer(
-        "📍 <b>Головне меню</b>\n\n"
-        "Тренуй саме ті блоки НМТ, які зараз потрібні.",
+        text,
         parse_mode="HTML",
-        reply_markup=get_main_keyboard(
-            web_app_url=WEB_APP_URL,
-            is_admin=user_id in ADMIN_IDS,
+        reply_markup=get_question_keyboard(
+            str(question["id"]),
+            options,
+            prefix=prefix,
         ),
     )
 
 
-async def get_task_by_id(
-    task_id: int,
-) -> Optional[dict[str, Any]]:
-    """
-    Отримує конкретне питання.
+async def _get_quiz_questions(
+    user_id: int,
+    category: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
 
-    Метод окремий, щоб callback не залежав від стану
-    після рестарту процесу.
-    """
+    if category == CATEGORY_PERSONALIZED:
+        return await DBClient.get_personalized_tasks(
+            user_id=user_id,
+            category=CATEGORY_USE_OF_ENGLISH,
+            limit=limit,
+        )
 
-    # Невеликий hack не потрібен: персоналізований вибір
-    # виконується до початку тесту, а всі task objects
-    # зберігаються у FSM.
-    return None
+    return await DBClient.get_personalized_tasks(
+        user_id=user_id,
+        category=category,
+        limit=limit,
+    )
+
+
+# ============================================================
+# START
+# ============================================================
 
 
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
-    state: FSMContext,
-) -> None:
-    if not message.from_user:
+    bot: Bot,
+):
+
+    user = message.from_user
+
+    if not user:
         return
 
-    user_id = message.from_user.id
-    referrer_id = parse_referrer(message)
+    user_id = user.id
 
-    user = await DBClient.get_or_create_user(
+    args = (
+        message.text.split(maxsplit=1)[1]
+        if message.text and " " in message.text
+        else ""
+    )
+
+    referrer_id: Optional[int] = None
+
+    if args.startswith("ref_"):
+        raw_referrer = args[4:].strip()
+
+        if raw_referrer.isdigit():
+            referrer_id = int(raw_referrer)
+
+    existing_result = await DBClient.get_or_create_user(
         user_id=user_id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
+        username=user.username,
+        first_name=user.first_name,
         referrer_id=referrer_id,
     )
 
-    if user.get("_is_new") and referrer_id:
-        await DBClient.process_referral(
-            new_user_id=user_id,
-            referrer_id=referrer_id,
+    is_new_user = (
+        int(existing_result.get("total_tasks_solved") or 0) == 0
+        and existing_result.get("last_streak_date") is None
+        and existing_result.get("created_at") is not None
+    )
+
+    await DBClient.record_activity(
+        user_id
+    )
+
+    if is_new_user:
+        questions = await DBClient.get_personalized_tasks(
+            user_id=user_id,
+            category=CATEGORY_USE_OF_ENGLISH,
+            limit=EXPRESS_QUIZ_LENGTH,
         )
 
-    if user.get("_is_new"):
-        await message.answer(
-            f"Привіт, <b>{message.from_user.first_name}</b>! 👋\n\n"
-            "Не будемо витрачати час на довгі анкети.\n"
-            "Зараз дам тобі <b>5 коротких завдань НМТ</b>, "
-            "а після них покажу орієнтовну стартову оцінку.\n\n"
-            "Готовий? 🚀",
-            parse_mode="HTML",
-        )
+        if questions:
+            await _start_quiz(
+                message=message,
+                user_id=user_id,
+                questions=questions,
+                title=(
+                    "⚡ <b>Експрес-тест НМТ</b>\n\n"
+                    "5 коротких завдань покажуть, "
+                    "на якому рівні ти зараз.\n\n"
+                    "Починаємо 👇"
+                ),
+                mode="express",
+            )
+            return
 
-        await start_express_test(
-            message=message,
-            state=state,
-        )
-        return
+    first_name = user.first_name or "Учень"
 
     await message.answer(
-        f"З поверненням, <b>{message.from_user.first_name}</b>! 👋\n\n"
-        "Продовжуємо підготовку?",
+        f"Вітаю, <b>{first_name}</b>! 👋\n\n"
+        "Це персональний тренажер "
+        "<b>НМТ з англійської мови</b>.\n\n"
+        "Тут ти можеш тренувати Reading, "
+        "Use of English та окремо відпрацьовувати "
+        "помилки, які заважають вийти на 190+.\n\n"
+        "Обирай дію нижче 👇",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(
             web_app_url=WEB_APP_URL,
@@ -155,16 +284,25 @@ async def cmd_start(
     )
 
 
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+
 @router.callback_query(F.data == "back_to_main")
-async def back_to_main(
+async def cb_back_to_main(
     callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    await state.clear()
+):
+
     await callback.answer()
 
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
     await callback.message.edit_text(
-        "📍 <b>Головне меню</b>",
+        "📍 <b>Головне меню</b>\n\n"
+        "Готовий зробити ще один крок до 190+?",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(
             web_app_url=WEB_APP_URL,
@@ -173,399 +311,81 @@ async def back_to_main(
     )
 
 
-async def start_express_test(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    user_id = message.from_user.id
-
-    allowed = await DBClient.consume_test(user_id)
-
-    if not allowed:
-        await message.answer(
-            "На сьогодні безкоштовні спроби вже використані.\n"
-            "У Premium лімітів на тести немає.",
-            reply_markup=get_tariffs_keyboard(),
-        )
-        return
-
-    tasks = await DBClient.get_express_tasks(
-        limit=EXPRESS_TEST_LENGTH,
-    )
-
-    if len(tasks) < 3:
-        await message.answer(
-            "⚠️ У базі поки недостатньо питань для експрес-тесту."
-        )
-        return
-
-    tasks = tasks[:EXPRESS_TEST_LENGTH]
-
-    await state.set_state(QuizFSM.mode)
-
-    await state.update_data(
-        mode="express",
-        category="express",
-        tasks=tasks,
-        current_index=0,
-        score=0,
-    )
-
-    await send_current_question(
-        message=message,
-        state=state,
-    )
-
-
-@router.callback_query(F.data == "start_quiz_menu")
-async def quiz_menu(
-    callback: CallbackQuery,
-) -> None:
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "🧠 <b>Обери формат тренування</b>",
-        parse_mode="HTML",
-        reply_markup=get_quiz_categories_keyboard(),
-    )
-
-
-async def start_category_test(
-    callback: CallbackQuery,
-    state: FSMContext,
-    category: str,
-) -> None:
-    user_id = callback.from_user.id
-
-    user = await DBClient.get_or_create_user(
-        user_id=user_id,
-        username=callback.from_user.username,
-        first_name=callback.from_user.first_name,
-    )
-
-    if not user.get("is_premium"):
-        allowed = await DBClient.consume_test(user_id)
-
-        if not allowed:
-            await callback.answer(
-                "Безкоштовні спроби на сьогодні закінчилися.",
-                show_alert=True,
-            )
-
-            await callback.message.edit_text(
-                "👑 <b>Хочеш більше практики?</b>\n\n"
-                "Premium прибирає денний ліміт і відкриває "
-                "персональне тренування.",
-                parse_mode="HTML",
-                reply_markup=get_tariffs_keyboard(),
-            )
-            return
-
-    tasks = await DBClient.get_personalized_tasks(
-        user_id=user_id,
-        category=category,
-        limit=5,
-    )
-
-    if not tasks:
-        await callback.answer(
-            "Поки немає питань у цьому розділі.",
-            show_alert=True,
-        )
-        return
-
-    await state.set_state(QuizFSM.mode)
-
-    await state.update_data(
-        mode="category",
-        category=category,
-        tasks=tasks,
-        current_index=0,
-        score=0,
-    )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        f"🚀 <b>{category}</b>\n\n"
-        "Відповідай на кожне питання. "
-        "Після завершення покажу результат.",
-        parse_mode="HTML",
-    )
-
-    await send_current_question(
-        message=callback.message,
-        state=state,
-    )
-
-
-@router.callback_query(F.data == "quiz_cat_reading")
-async def quiz_reading(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    await start_category_test(
-        callback,
-        state,
-        "Reading",
-    )
-
-
-@router.callback_query(F.data == "quiz_cat_use_of_english")
-async def quiz_use_of_english(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    await start_category_test(
-        callback,
-        state,
-        "Use of English",
-    )
-
-
-@router.callback_query(F.data == "quiz_cat_personalized")
-async def quiz_personalized(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    await start_category_test(
-        callback,
-        state,
-        "personalized",
-    )
-
-
-async def send_current_question(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    data = await state.get_data()
-
-    tasks = data.get("tasks") or []
-    current_index = int(data.get("current_index", 0))
-
-    if current_index >= len(tasks):
-        await finish_quiz(
-            message=message,
-            state=state,
-        )
-        return
-
-    task = tasks[current_index]
-
-    options = task.get("options") or {}
-
-    category = task.get("category", "НМТ")
-
-    text = (
-        f"📝 <b>Питання {current_index + 1}/{len(tasks)}</b>\n"
-        f"Розділ: <b>{category}</b>\n\n"
-        f"{task.get('question_text', '')}"
-    )
-
-    try:
-        await message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=get_answer_keyboard(
-                int(task["id"]),
-                options,
-            ),
-        )
-    except TelegramBadRequest:
-        await message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=get_answer_keyboard(
-                int(task["id"]),
-                options,
-            ),
-        )
-
-
-@router.callback_query(F.data.startswith("quiz_answer:"))
-async def quiz_answer(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":")
-
-    if len(parts) != 3:
-        await callback.answer("Некоректна відповідь.", show_alert=True)
-        return
-
-    try:
-        task_id = int(parts[1])
-    except ValueError:
-        await callback.answer("Некоректне питання.", show_alert=True)
-        return
-
-    answer = parts[2].upper()
-
-    if answer not in {"A", "B", "C", "D"}:
-        await callback.answer("Некоректна відповідь.", show_alert=True)
-        return
-
-    data = await state.get_data()
-
-    tasks = data.get("tasks") or []
-    current_index = int(data.get("current_index", 0))
-    score = int(data.get("score", 0))
-
-    if current_index >= len(tasks):
-        await callback.answer("Тест вже завершено.")
-        return
-
-    task = tasks[current_index]
-
-    if int(task["id"]) != task_id:
-        await callback.answer(
-            "Це питання вже неактивне.",
-            show_alert=False,
-        )
-        return
-
-    correct_answer = str(
-        task.get("correct_answer", "")
-    ).upper()
-
-    is_correct = answer == correct_answer
-
-    if is_correct:
-        score += 1
-
-    await DBClient.save_attempt(
-        user_id=callback.from_user.id,
-        task_id=task_id,
-        answer=answer,
-        is_correct=is_correct,
-    )
-
-    await state.update_data(
-        score=score,
-        current_index=current_index + 1,
-    )
-
-    await callback.answer(
-        "✅ Правильно!" if is_correct else "❌ Помилка."
-    )
-
-    if not is_correct and task.get("explanation"):
-        await callback.message.answer(
-            "💡 <b>Розбір:</b>\n"
-            f"{task['explanation']}",
-            parse_mode="HTML",
-        )
-
-    await send_current_question(
-        message=callback.message,
-        state=state,
-    )
-
-
-async def finish_quiz(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    data = await state.get_data()
-
-    tasks = data.get("tasks") or []
-    score = int(data.get("score", 0))
-    total = len(tasks)
-
-    if total <= 0:
-        await state.clear()
-        return
-
-    score_200 = round(
-        (score / total) * 200
-    )
-
-    await DBClient.complete_test(
-        message.chat.id,
-    )
-
-    referrer_id = await DBClient.complete_referral(
-        message.chat.id,
-    )
-
-    if referrer_id:
-        try:
-            await message.bot.send_message(
-                referrer_id,
-                "🎉 <b>Твій друг завершив перший тест!</b>\n\n"
-                f"Ти отримав <b>+{REFERRAL_PREMIUM_DAYS} дні Premium</b> "
-                "за запрошення.",
-                parse_mode="HTML",
-            )
-        except Exception as exc:
-            logger.warning(
-                "Не вдалося повідомити реферера %s: %s",
-                referrer_id,
-                exc,
-            )
-
-    mode = data.get("mode")
-
-    if mode == "express":
-        text = (
-            "🎯 <b>Експрес-тест завершено!</b>\n\n"
-            f"Результат: <b>{score}/{total}</b>\n\n"
-            f"Твій орієнтовний стартовий бал: "
-            f"<b>{score_200}/200</b>.\n\n"
-            "Це не офіційний перерахунок НМТ, а стартова "
-            "оцінка для тренажера.\n\n"
-            "Хочеш рухатися до <b>180+</b>? "
-            "Переходь до персонального тренування."
-        )
-    else:
-        text = (
-            "🏁 <b>Тест завершено!</b>\n\n"
-            f"Правильних: <b>{score}/{total}</b>\n"
-            f"Орієнтовний результат: <b>{score_200}/200</b>\n\n"
-            "Наступний крок — повторити питання, "
-            "де були помилки."
-        )
-
-    await state.clear()
-
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=get_quiz_categories_keyboard(),
-    )
+# ============================================================
+# PROFILE
+# ============================================================
 
 
 @router.callback_query(F.data == "show_profile")
-async def show_profile(
+async def cb_show_profile(
     callback: CallbackQuery,
-) -> None:
+    bot: Bot,
+):
+
     await callback.answer()
 
-    user = await DBClient.get_user_profile(
-        callback.from_user.id,
+    user_id = callback.from_user.id
+
+    user = await DBClient.refresh_premium_status(
+        user_id
     )
 
-    premium_until = user.get("premium_until")
+    await DBClient.record_activity(
+        user_id
+    )
 
-    if user.get("is_premium") and premium_until:
-        status = f"👑 Premium до <b>{premium_until[:10]}</b>"
-    elif user.get("is_premium"):
-        status = "👑 Premium"
-    else:
-        status = "👤 Free"
+    bot_info = await bot.get_me()
+
+    ref_link, _ = build_referral_share_url(
+        bot_username=bot_info.username,
+        user_id=user_id,
+    )
+
+    is_premium = bool(
+        user.get("is_premium")
+    )
+
+    status = (
+        "⭐ Premium"
+        if is_premium
+        else "🆓 Free"
+    )
+
+    solved = int(
+        user.get("total_tasks_solved") or 0
+    )
+
+    streak = int(
+        user.get("streak") or 0
+    )
+
+    referrals = int(
+        user.get("referrals_count") or 0
+    )
+
+    premium_until = user.get(
+        "premium_until"
+    )
+
+    premium_line = ""
+
+    if is_premium and premium_until:
+        premium_line = (
+            f"\n⏳ Premium до: "
+            f"<code>{str(premium_until)[:10]}</code>"
+        )
 
     text = (
         "👤 <b>Твій профіль</b>\n\n"
-        f"Статус: {status}\n"
+        f"Статус: <b>{status}</b>"
+        f"{premium_line}\n\n"
         f"📚 Розв'язано завдань: "
-        f"<b>{int(user.get('total_tasks_solved') or 0)}</b>\n"
-        f"🔥 Streak: "
-        f"<b>{int(user.get('streak') or 0)} днів</b>\n"
-        f"🎯 Завершено тестів: "
-        f"<b>{int(user.get('total_tests_passed') or 0)}</b>\n"
+        f"<b>{solved}</b>\n"
+        f"🔥 Streak: <b>{streak} днів</b>\n"
         f"👥 Запрошено друзів: "
-        f"<b>{int(user.get('referrals_count') or 0)}</b>"
+        f"<b>{referrals}</b>\n\n"
+        "🔗 <b>Твоє реферальне посилання:</b>\n"
+        f"<code>{ref_link}</code>"
     )
 
     await callback.message.edit_text(
@@ -575,82 +395,93 @@ async def show_profile(
     )
 
 
+# ============================================================
+# REFERRALS
+# ============================================================
+
+
 @router.callback_query(F.data == "show_referral")
-async def show_referral(
+async def cb_show_referral(
     callback: CallbackQuery,
     bot: Bot,
-) -> None:
+):
+
     await callback.answer()
 
-    me = await bot.get_me()
+    user_id = callback.from_user.id
 
-    link = (
-        f"https://t.me/{me.username}"
-        f"?start=ref_{callback.from_user.id}"
+    await DBClient.record_activity(
+        user_id
     )
 
-    user = await DBClient.get_user_profile(
-        callback.from_user.id,
+    bot_info = await bot.get_me()
+
+    ref_link, share_url = (
+        build_referral_share_url(
+            bot_username=bot_info.username,
+            user_id=user_id,
+        )
     )
 
-    share_text = (
-        "🔥 Я готуюся до НМТ з англійської тут.\n"
-        "Спробуй короткий тест і подивись свій результат 👇"
+    user = await DBClient.get_or_create_user(
+        user_id=user_id,
+        username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
     )
 
-    share_url = (
-        "https://t.me/share/url"
-        f"?url={link}"
-        f"&text={share_text}"
+    referrals = int(
+        user.get("referrals_count") or 0
     )
 
     text = (
         "🎁 <b>Реферальна програма</b>\n\n"
-        f"Запрошуй друзів за своїм посиланням.\n"
-        f"Коли запрошений друг завершить перший тест, "
-        f"ти отримаєш <b>+{REFERRAL_PREMIUM_DAYS} дні Premium</b>.\n\n"
-        f"👥 Твої запрошені друзі: "
-        f"<b>{int(user.get('referrals_count') or 0)}</b>\n\n"
-        f"🔗 <code>{link}</code>"
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📤 Поділитися",
-                    url=share_url,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Профіль",
-                    callback_data="show_profile",
-                )
-            ],
-        ]
+        "Запроси друга пройти експрес-тест НМТ.\n\n"
+        "Коли запрошений друг завершить хоча б "
+        "один тест, ти автоматично отримаєш "
+        "<b>+3 дні Premium</b>. ⭐\n\n"
+        f"👥 Твої запрошення: <b>{referrals}</b>\n\n"
+        "🔗 Твоє посилання:\n"
+        f"<code>{ref_link}</code>"
     )
 
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
-        reply_markup=keyboard,
+        reply_markup=get_referral_keyboard(
+            share_url
+        ),
     )
 
 
+# ============================================================
+# TARIFFS
+# ============================================================
+
+
 @router.callback_query(F.data == "show_tariffs")
-async def show_tariffs(
+async def cb_show_tariffs(
     callback: CallbackQuery,
-) -> None:
+):
+
     await callback.answer()
 
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
     text = (
-        "👑 <b>Premium</b>\n\n"
-        "Для тих, хто хоче тренуватися без денного ліміту "
-        "та системно працювати над помилками.\n\n"
-        f"⭐ <b>{STARS_3_DAYS}</b> — 3 дні\n"
-        f"⭐ <b>{STARS_30_DAYS}</b> — 30 днів\n\n"
-        "Оплата проходить безпосередньо через Telegram Stars."
+        "⭐ <b>Premium для НМТ</b>\n\n"
+        "Без зайвих пакетів — обирай потрібний "
+        "термін доступу.\n\n"
+        f"⭐ <b>3 дні — {PREMIUM_3_DAYS_PRICE} Stars</b>\n"
+        "• Premium-доступ\n"
+        "• безлімітні тренування\n"
+        "• персональний підбір помилок\n\n"
+        f"🌟 <b>30 днів — {PREMIUM_30_DAYS_PRICE} Stars</b>\n"
+        "• повний Premium на місяць\n"
+        "• безлімітні тренування\n"
+        "• персональний симулятор помилок\n\n"
+        "Оплата проходить прямо через Telegram Stars."
     )
 
     await callback.message.edit_text(
@@ -660,63 +491,534 @@ async def show_tariffs(
     )
 
 
-async def send_stars_invoice(
-    callback: CallbackQuery,
-    days: int,
-    stars: int,
-) -> None:
-    payload = f"premium_{days}days"
+# ============================================================
+# QUIZ MENU
+# ============================================================
 
-    await callback.bot.send_invoice(
-        chat_id=callback.from_user.id,
-        title=f"NMT Premium — {days} дні",
-        description=(
-            "Персональне тренування НМТ, "
-            "безлімітні тести та робота над помилками."
+
+@router.callback_query(F.data == "start_quiz_menu")
+async def cb_start_quiz_menu(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
+    await callback.message.edit_text(
+        "🧠 <b>Тренування НМТ</b>\n\n"
+        "Обери блок, який хочеш прокачати:",
+        parse_mode="HTML",
+        reply_markup=get_quiz_categories_keyboard(),
+    )
+
+
+# ============================================================
+# QUIZ START
+# ============================================================
+
+
+async def _start_quiz(
+    message: Message,
+    user_id: int,
+    questions: List[Dict[str, Any]],
+    title: str,
+    mode: str,
+):
+
+    if not questions:
+        await message.answer(
+            "😔 У цьому розділі поки недостатньо "
+            "питань.\n\n"
+            "Додай їх через адмін-панель."
+        )
+        return
+
+    prepared_questions = []
+
+    for index, question in enumerate(
+        questions,
+        start=1,
+    ):
+        prepared = dict(question)
+        prepared["_number"] = index
+        prepared_questions.append(prepared)
+
+    await message.answer(
+        title,
+        parse_mode="HTML",
+    )
+
+    # Для одного користувача quiz state зберігається
+    # в FSM MemoryStorage через dispatcher.
+    from aiogram.fsm.context import FSMContext
+
+    # Actual state is created in callback handler.
+    # Here we attach the data using bot-level temporary storage.
+    QUIZ_SESSIONS[user_id] = {
+        "questions": prepared_questions,
+        "index": 0,
+        "correct": 0,
+        "mode": mode,
+        "category": (
+            prepared_questions[0].get(
+                "category",
+                prepared_questions[0].get(
+                    "topic",
+                    "НМТ",
+                ),
+            )
         ),
-        payload=payload,
+        "referrer_checked": False,
+    }
+
+    await _send_question(
+        message,
+        prepared_questions[0],
+    )
+
+
+QUIZ_SESSIONS: Dict[int, Dict[str, Any]] = {}
+
+
+async def _begin_category_quiz(
+    callback: CallbackQuery,
+    category: str,
+):
+
+    user_id = callback.from_user.id
+
+    can_start = await DBClient.can_start_quiz(
+        user_id
+    )
+
+    if not can_start:
+        await callback.answer(
+            "Ліміт Free на сьогодні вичерпано. ⭐",
+            show_alert=True,
+        )
+
+        await callback.message.edit_text(
+            "⭐ <b>Ти використав усі 3 Free-тести на сьогодні.</b>\n\n"
+            "Premium відкриває безлімітні тренування.",
+            parse_mode="HTML",
+            reply_markup=get_tariffs_keyboard(),
+        )
+        return
+
+    consumed = await DBClient.consume_quiz_attempt(
+        user_id
+    )
+
+    if not consumed:
+        await callback.answer(
+            "Ліміт тестів вичерпано.",
+            show_alert=True,
+        )
+        return
+
+    limit = REGULAR_QUIZ_LENGTH
+
+    questions = await _get_quiz_questions(
+        user_id=user_id,
+        category=category,
+        limit=limit,
+    )
+
+    if not questions:
+        await callback.answer(
+            "У цьому розділі поки немає питань.",
+            show_alert=True,
+        )
+        return
+
+    title_map = {
+        CATEGORY_READING: (
+            "📖 <b>Reading</b>\n\n"
+            "Перевіряємо розуміння тексту "
+            "та вміння знаходити правильну відповідь."
+        ),
+        CATEGORY_USE_OF_ENGLISH: (
+            "🔤 <b>Use of English</b>\n\n"
+            "Працюємо з лексикою, граматикою "
+            "та типовими пастками НМТ."
+        ),
+        CATEGORY_PERSONALIZED: (
+            "🎯 <b>Симулятор помилок 190+</b>\n\n"
+            "Підбираємо завдання з урахуванням "
+            "твоїх попередніх помилок."
+        ),
+    }
+
+    await callback.answer()
+
+    await _start_quiz(
+        message=callback.message,
+        user_id=user_id,
+        questions=questions,
+        title=title_map.get(
+            category,
+            "🧠 <b>Тест НМТ</b>",
+        ),
+        mode="regular",
+    )
+
+
+@router.callback_query(F.data == "quiz_cat_reading")
+async def quiz_reading(
+    callback: CallbackQuery,
+):
+
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
+    await _begin_category_quiz(
+        callback,
+        CATEGORY_READING,
+    )
+
+
+@router.callback_query(
+    F.data == "quiz_cat_use_of_english"
+)
+async def quiz_use_of_english(
+    callback: CallbackQuery,
+):
+
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
+    await _begin_category_quiz(
+        callback,
+        CATEGORY_USE_OF_ENGLISH,
+    )
+
+
+@router.callback_query(
+    F.data == "quiz_cat_personalized"
+)
+async def quiz_personalized(
+    callback: CallbackQuery,
+):
+
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
+    await _begin_category_quiz(
+        callback,
+        CATEGORY_PERSONALIZED,
+    )
+
+
+# ============================================================
+# ANSWERS
+# ============================================================
+
+
+@router.callback_query(
+    F.data.startswith("quiz_answer:")
+)
+async def process_quiz_answer(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    user_id = callback.from_user.id
+
+    await DBClient.record_activity(
+        user_id
+    )
+
+    parts = callback.data.split(":")
+
+    if len(parts) != 3:
+        return
+
+    _, question_id, selected_letter = parts
+
+    session = QUIZ_SESSIONS.get(
+        user_id
+    )
+
+    if not session:
+        await callback.message.answer(
+            "⚠️ Цей тест уже завершено або він застарів.\n"
+            "Запусти новий тест."
+        )
+        return
+
+    questions = session["questions"]
+    index = int(session["index"])
+
+    if index >= len(questions):
+        return
+
+    question = questions[index]
+
+    if str(question.get("id")) != str(question_id):
+        await callback.answer(
+            "⚠️ Це питання вже неактуальне.",
+            show_alert=True,
+        )
+        return
+
+    selected_letter = selected_letter.upper()
+
+    correct_letter = _correct_letter(
+        question
+    )
+
+    is_correct = (
+        selected_letter == correct_letter
+    )
+
+    if is_correct:
+        session["correct"] += 1
+
+    answer_index = {
+        "A": 0,
+        "B": 1,
+        "C": 2,
+        "D": 3,
+    }.get(
+        selected_letter,
+        0,
+    )
+
+    try:
+        await DBClient.save_attempt(
+            user_id=user_id,
+            question_id=str(question["id"]),
+            answer=answer_index,
+            is_correct=is_correct,
+        )
+    except Exception:
+        logger.exception(
+            "Не вдалося зберегти відповідь."
+        )
+
+    if is_correct:
+        feedback = "✅ <b>Правильно!</b>"
+    else:
+        feedback = (
+            "❌ <b>Не цього разу.</b>\n"
+            f"Правильна відповідь: "
+            f"<b>{correct_letter}</b>"
+        )
+
+    explanation = (
+        question.get("explanation") or ""
+    ).strip()
+
+    if explanation:
+        feedback += (
+            f"\n\n💡 {explanation}"
+        )
+
+    await callback.message.edit_reply_markup(
+        reply_markup=None
+    )
+
+    await callback.message.answer(
+        feedback,
+        parse_mode="HTML",
+    )
+
+    session["index"] += 1
+
+    if session["index"] >= len(questions):
+        await _finish_quiz(
+            callback.message,
+            user_id,
+        )
+        return
+
+    next_question = questions[
+        session["index"]
+    ]
+
+    await _send_question(
+        callback.message,
+        next_question,
+    )
+
+
+async def _finish_quiz(
+    message: Message,
+    user_id: int,
+):
+
+    session = QUIZ_SESSIONS.pop(
+        user_id,
+        None,
+    )
+
+    if not session:
+        return
+
+    correct = int(
+        session["correct"]
+    )
+
+    total = len(
+        session["questions"]
+    )
+
+    score = _score_to_200(
+        correct,
+        total,
+    )
+
+    if score >= 180:
+        conclusion = (
+            "🔥 Дуже сильний результат. "
+            "Тепер головне — не втрачати бали "
+            "на дрібних пастках."
+        )
+    elif score >= 150:
+        conclusion = (
+            "💪 Хороша база. Найбільший резерв "
+            "зараз — системно добивати помилки."
+        )
+    elif score >= 120:
+        conclusion = (
+            "📈 Потенціал є. Регулярні короткі "
+            "тренування дадуть найбільший приріст."
+        )
+    else:
+        conclusion = (
+            "🚀 Це лише старт. Саме помилки зараз "
+            "показують, що треба прокачати."
+        )
+
+    await DBClient.record_activity(
+        user_id
+    )
+
+    referral_rewarded = await DBClient.process_referral(
+        new_user_id=user_id,
+        referrer_id=None,
+    )
+
+    # Referral is processed below through user's actual
+    # referrer if it exists.
+    try:
+        user = await DBClient.get_or_create_user(
+            user_id=user_id
+        )
+
+        referrer_id = user.get(
+            "referrer_id"
+        )
+
+        if referrer_id:
+            referral_rewarded = (
+                await DBClient.process_referral(
+                    new_user_id=user_id,
+                    referrer_id=int(referrer_id),
+                )
+            )
+
+    except Exception:
+        logger.exception(
+            "Помилка referral reward."
+        )
+
+    reward_text = ""
+
+    if referral_rewarded:
+        reward_text = (
+            "\n\n🎁 <b>Твій друг завершив тест!</b>\n"
+            "Реферальна нагорода активована."
+        )
+
+    await message.answer(
+        "🏁 <b>Тест завершено!</b>\n\n"
+        f"Правильних: <b>{correct}/{total}</b>\n"
+        f"🎯 Твій поточний результат: "
+        f"<b>{score}/200</b>\n\n"
+        f"{conclusion}"
+        f"{reward_text}\n\n"
+        "Хочеш підняти результат? "
+        "Наступне тренування вже підбиратиме "
+        "питання з урахуванням твоїх помилок.",
+        parse_mode="HTML",
+        reply_markup=get_quiz_categories_keyboard(),
+    )
+
+
+# ============================================================
+# STARS
+# ============================================================
+
+
+@router.callback_query(
+    F.data == "buy_premium_3days"
+)
+async def buy_premium_3days(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+
+    await callback.answer()
+
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="NMT English Premium — 3 дні",
+        description=(
+            "3 дні Premium-доступу до тренажера НМТ."
+        ),
+        payload="premium_3days",
         currency="XTR",
         prices=[
             LabeledPrice(
-                label=f"Premium {days} дні",
-                amount=stars,
+                label="Premium 3 дні",
+                amount=PREMIUM_3_DAYS_PRICE,
             )
         ],
         provider_token="",
-        start_parameter=payload,
     )
 
 
-@router.callback_query(F.data == "buy_premium_3days")
-async def buy_premium_3days(
-    callback: CallbackQuery,
-) -> None:
-    await callback.answer()
-
-    await send_stars_invoice(
-        callback=callback,
-        days=PREMIUM_3_DAYS,
-        stars=STARS_3_DAYS,
-    )
-
-
-@router.callback_query(F.data == "buy_premium_30days")
+@router.callback_query(
+    F.data == "buy_premium_30days"
+)
 async def buy_premium_30days(
     callback: CallbackQuery,
-) -> None:
+    bot: Bot,
+):
+
     await callback.answer()
 
-    await send_stars_invoice(
-        callback=callback,
-        days=PREMIUM_30_DAYS,
-        stars=STARS_30_DAYS,
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="NMT English Premium — 30 днів",
+        description=(
+            "30 днів Premium-доступу до тренажера НМТ."
+        ),
+        payload="premium_30days",
+        currency="XTR",
+        prices=[
+            LabeledPrice(
+                label="Premium 30 днів",
+                amount=PREMIUM_30_DAYS_PRICE,
+            )
+        ],
+        provider_token="",
     )
 
 
 @router.pre_checkout_query()
 async def process_pre_checkout(
     pre_checkout_query: PreCheckoutQuery,
-) -> None:
+):
+
     payload = pre_checkout_query.invoice_payload
 
     if payload not in {
@@ -725,92 +1027,274 @@ async def process_pre_checkout(
     }:
         await pre_checkout_query.answer(
             ok=False,
-            error_message="Невідомий тариф.",
+            error_message=(
+                "Невідомий платіж."
+            ),
         )
         return
 
     expected_amount = {
-        "premium_3days": STARS_3_DAYS,
-        "premium_30days": STARS_30_DAYS,
+        "premium_3days": PREMIUM_3_DAYS_PRICE,
+        "premium_30days": PREMIUM_30_DAYS_PRICE,
     }[payload]
 
     if pre_checkout_query.total_amount != expected_amount:
         await pre_checkout_query.answer(
             ok=False,
-            error_message="Сума рахунку не відповідає тарифу.",
+            error_message=(
+                "Сума платежу не відповідає тарифу."
+            ),
         )
         return
 
     await pre_checkout_query.answer(
-        ok=True,
+        ok=True
     )
 
 
-@router.message(F.successful_payment)
+@router.message(
+    F.successful_payment
+)
 async def process_successful_payment(
     message: Message,
-) -> None:
+):
+
     payment = message.successful_payment
 
-    if payment is None:
+    if not payment:
         return
 
     payload = payment.invoice_payload
 
-    plan_days = {
+    days_map = {
         "premium_3days": PREMIUM_3_DAYS,
         "premium_30days": PREMIUM_30_DAYS,
-    }.get(payload)
+    }
 
-    if plan_days is None:
-        logger.error(
-            "Unknown successful payment payload: %s",
+    days = days_map.get(payload)
+
+    if not days:
+        logger.warning(
+            "Невідомий payment payload: %s",
             payload,
         )
         return
 
-    registered = await DBClient.register_payment(
-        user_id=message.from_user.id,
-        payload=payload,
-        charge_id=payment.telegram_payment_charge_id,
-        amount=payment.total_amount,
-    )
+    expected_amount = {
+        "premium_3days": PREMIUM_3_DAYS_PRICE,
+        "premium_30days": PREMIUM_30_DAYS_PRICE,
+    }.get(payload)
 
-    if not registered:
-        await message.answer(
-            "ℹ️ Цей платіж уже був оброблений."
+    if payment.total_amount != expected_amount:
+        logger.error(
+            "Невідповідна сума Stars: %s",
+            payment.total_amount,
         )
         return
 
-    premium_until = await DBClient.grant_premium(
-        user_id=message.from_user.id,
-        days=plan_days,
-    )
+    try:
+        user = await DBClient.grant_premium(
+            user_id=message.from_user.id,
+            days=days,
+        )
 
-    until_text = (
-        premium_until.strftime("%d.%m.%Y")
-        if premium_until
-        else "активовано"
-    )
+        await DBClient.record_activity(
+            message.from_user.id
+        )
 
-    await message.answer(
-        "🎉 <b>Premium активовано!</b>\n\n"
-        f"Термін: <b>{plan_days} дні</b>\n"
-        f"Активний до: <b>{until_text}</b>\n\n"
-        "Можеш одразу запускати персональне тренування 🚀",
-        parse_mode="HTML",
-        reply_markup=get_quiz_categories_keyboard(),
-    )
+        premium_until = user.get(
+            "premium_until",
+            "",
+        )
+
+        await message.answer(
+            "🎉 <b>Premium активовано!</b>\n\n"
+            f"Тривалість: <b>{days} днів</b>\n"
+            f"⭐ Оплачено: "
+            f"<b>{payment.total_amount} Stars</b>\n\n"
+            f"⏳ Premium до: "
+            f"<code>{str(premium_until)[:10]}</code>\n\n"
+            "Можеш одразу запускати нове тренування.",
+            parse_mode="HTML",
+            reply_markup=get_quiz_categories_keyboard(),
+        )
+
+    except Exception:
+        logger.exception(
+            "Помилка активації Premium після Stars."
+        )
+
+        await message.answer(
+            "⚠️ Платіж отримано, але виникла "
+            "помилка при активації Premium.\n\n"
+            "Адміністратора повідомлено."
+        )
 
 
-@router.message(Command("admin"))
-async def admin_command(
-    message: Message,
-) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+# ============================================================
+# DAILY RETENTION
+# ============================================================
+
+
+async def daily_retention_loop(
+    bot: Bot,
+):
+
+    """
+    Background retention loop.
+
+    Runs once per hour and finds users who have not
+    interacted with the bot for 24+ hours.
+    """
+
+    while True:
+
+        try:
+            user_ids = (
+                await DBClient.get_daily_reminder_candidates(
+                    hours=24,
+                    limit=100,
+                )
+            )
+
+            for user_id in user_ids:
+
+                try:
+                    question = (
+                        await DBClient.get_random_question(
+                            category=CATEGORY_USE_OF_ENGLISH
+                        )
+                    )
+
+                    if not question:
+                        continue
+
+                    options = _format_options(
+                        question
+                    )
+
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "🔥 <b>Твій streak чекає.</b>\n\n"
+                            "Одна коротка задача НМТ — "
+                            "перевіримо, чи пам'ятаєш правило 👇\n\n"
+                            f"{question.get('question_text', '')}"
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=get_question_keyboard(
+                            str(question["id"]),
+                            options,
+                            prefix="daily_answer",
+                        ),
+                    )
+
+                    await DBClient.mark_reminder_sent(
+                        user_id
+                    )
+
+                    await asyncio.sleep(
+                        0.1
+                    )
+
+                except Exception:
+                    logger.exception(
+                        "Помилка retention reminder для %s",
+                        user_id,
+                    )
+
+        except Exception:
+            logger.exception(
+                "Помилка Daily Retention Loop."
+            )
+
+        await asyncio.sleep(
+            60 * 60
+        )
+
+
+@router.callback_query(
+    F.data.startswith("daily_answer:")
+)
+async def process_daily_answer(
+    callback: CallbackQuery,
+):
+
+    parts = callback.data.split(":")
+
+    if len(parts) != 3:
+        await callback.answer()
         return
 
-    await message.answer(
-        "⚡ <b>Адмін-панель</b>",
+    _, question_id, selected_letter = parts
+
+    question = None
+
+    try:
+        # Для конкретного question_id Supabase search не потрібен:
+        # беремо невеликий набір і знаходимо потрібне.
+        questions = await DBClient.get_personalized_tasks(
+            user_id=callback.from_user.id,
+            category=CATEGORY_USE_OF_ENGLISH,
+            limit=20,
+        )
+
+        for item in questions:
+            if str(item.get("id")) == str(question_id):
+                question = item
+                break
+
+    except Exception:
+        logger.exception(
+            "Помилка пошуку daily question."
+        )
+
+    await callback.answer()
+
+    await DBClient.record_activity(
+        callback.from_user.id
+    )
+
+    if not question:
+        await callback.message.answer(
+            "⚠️ Це питання вже недоступне."
+        )
+        return
+
+    correct = _correct_letter(
+        question
+    )
+
+    selected = selected_letter.upper()
+
+    if selected == correct:
+        text = (
+            "🔥 <b>Правильно!</b>\n\n"
+            "Streak продовжено. Так тримати."
+        )
+    else:
+        text = (
+            "❌ <b>Не вгадав.</b>\n\n"
+            f"Правильна відповідь: <b>{correct}</b>"
+        )
+
+        explanation = (
+            question.get("explanation") or ""
+        ).strip()
+
+        if explanation:
+            text += (
+                f"\n\n💡 {explanation}"
+            )
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        text,
         parse_mode="HTML",
     )
