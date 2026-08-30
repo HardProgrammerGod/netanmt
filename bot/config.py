@@ -1,5 +1,5 @@
 import os
-from typing import Final
+from typing import List
 
 from dotenv import load_dotenv
 
@@ -7,99 +7,105 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def _required(name: str) -> str:
+def _get_required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
+
     if not value:
-        raise ValueError(f"❌ Змінна оточення {name} не знайдена.")
+        raise ValueError(
+            f"❌ Критична змінна оточення {name} не знайдена."
+        )
+
     return value
 
 
-def _parse_admin_ids(raw: str) -> list[int]:
-    result: list[int] = []
+BOT_TOKEN: str = _get_required_env("BOT_TOKEN")
+SUPABASE_URL: str = _get_required_env("SUPABASE_URL")
+SUPABASE_KEY: str = _get_required_env("SUPABASE_KEY")
+WEBHOOK_BASE_URL: str = _get_required_env("WEBHOOK_BASE_URL")
 
-    for item in raw.split(","):
+
+def _parse_admin_ids(raw_value: str) -> List[int]:
+    result: List[int] = []
+
+    for item in raw_value.split(","):
         item = item.strip()
 
-        if item.isdigit():
+        if not item:
+            continue
+
+        try:
             result.append(int(item))
+        except ValueError:
+            raise ValueError(
+                f"❌ Некоректний ADMIN_IDS елемент: {item!r}"
+            )
 
     return result
 
 
-BOT_TOKEN: Final[str] = _required("BOT_TOKEN")
-SUPABASE_URL: Final[str] = _required("SUPABASE_URL")
-SUPABASE_KEY: Final[str] = _required("SUPABASE_KEY")
-
-ADMIN_IDS: Final[list[int]] = _parse_admin_ids(
+ADMIN_IDS: List[int] = _parse_admin_ids(
     os.getenv("ADMIN_IDS", "")
 )
 
-WEB_APP_URL: Final[str] = os.getenv("WEB_APP_URL", "").strip()
+WEBHOOK_PATH: str = "/webhook"
 
-ADMIN_USERNAME: Final[str] = (
-    os.getenv("ADMIN_USERNAME", "nnopkam")
-    .strip()
-    .lstrip("@")
+PORT: int = int(
+    os.getenv("PORT", "8080")
 )
 
-PORT: Final[int] = int(os.getenv("PORT", "8080"))
+WEBHOOK_URL: str = (
+    f"{WEBHOOK_BASE_URL.rstrip('/')}{WEBHOOK_PATH}"
+)
 
-WEBHOOK_PATH: Final[str] = "/webhook"
-
-WEBHOOK_SECRET: Final[str] = os.getenv(
-    "WEBHOOK_SECRET",
-    "change-this-webhook-secret",
-).strip()
-
-RENDER_EXTERNAL_URL: Final[str] = os.getenv(
-    "RENDER_EXTERNAL_URL",
-    "",
-).strip()
-
-CUSTOM_WEBHOOK_URL: Final[str] = os.getenv(
-    "WEBHOOK_URL",
-    "",
+WEB_APP_URL: str = os.getenv(
+    "WEB_APP_URL",
+    ""
 ).strip()
 
 
-def get_webhook_url() -> str:
-    """
-    Формує публічний HTTPS URL webhook.
+# ------------------------------------------------------------
+# Product configuration
+# ------------------------------------------------------------
 
-    Пріоритет:
-    1. WEBHOOK_URL
-    2. RENDER_EXTERNAL_URL
-    """
-    base_url = CUSTOM_WEBHOOK_URL or RENDER_EXTERNAL_URL
+FREE_DAILY_QUIZ_LIMIT: int = 3
 
-    if not base_url:
-        raise ValueError(
-            "❌ Не знайдено WEBHOOK_URL або RENDER_EXTERNAL_URL. "
-            "Для webhook потрібен публічний HTTPS URL."
-        )
+EXPRESS_QUIZ_LENGTH: int = 5
 
-    base_url = base_url.rstrip("/")
+REGULAR_QUIZ_LENGTH: int = 5
 
-    if not base_url.startswith("https://"):
-        raise ValueError(
-            "❌ WEBHOOK_URL / RENDER_EXTERNAL_URL повинен починатися з https://"
-        )
+PREMIUM_3_DAYS: int = 3
 
-    return f"{base_url}{WEBHOOK_PATH}"
+PREMIUM_30_DAYS: int = 30
+
+PREMIUM_3_DAYS_PRICE: int = 49
+
+PREMIUM_30_DAYS_PRICE: int = 199
+
+REFERRAL_PREMIUM_DAYS: int = 3
 
 
-FREE_DAILY_TESTS: Final[int] = 3
-EXPRESS_TEST_LENGTH: Final[int] = 5
+# ------------------------------------------------------------
+# NMT categories
+# ------------------------------------------------------------
 
-REFERRAL_PREMIUM_DAYS: Final[int] = 3
+CATEGORY_READING = "Reading"
 
-PREMIUM_3_DAYS: Final[int] = 3
-PREMIUM_30_DAYS: Final[int] = 30
+CATEGORY_USE_OF_ENGLISH = "Use of English"
 
-STARS_3_DAYS: Final[int] = 49
-STARS_30_DAYS: Final[int] = 199
+CATEGORY_PERSONALIZED = "Персональний симулятор помилок"
 
-RETENTION_CHECK_INTERVAL_SECONDS: Final[int] = 60 * 60
-RETENTION_INACTIVE_HOURS: Final[int] = 24
+ALLOWED_CATEGORIES = {
+    CATEGORY_READING,
+    CATEGORY_USE_OF_ENGLISH,
+    CATEGORY_PERSONALIZED,
+}
 
-DB_SEMAPHORE_LIMIT: Final[int] = 12
+
+# ------------------------------------------------------------
+# Validation
+# ------------------------------------------------------------
+
+if not ADMIN_IDS:
+    # Це не критична помилка для користувачів,
+    # але попереджаємо в логах у main.py.
+    pass
