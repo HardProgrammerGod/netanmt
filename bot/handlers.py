@@ -2,7 +2,12 @@ import asyncio
 import logging
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import (
+    Message, 
+    CallbackQuery, 
+    LabeledPrice, 
+    PreCheckoutQuery
+)
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 
 from bot.config import ADMIN_IDS, WEB_APP_URL
@@ -24,9 +29,9 @@ router = Router()
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or ""
-    first_name = message.from_user.first_name or ""
+    first_name = message.from_user.first_name or "Учень"
     
-    # Витягуємо ID реферера, якщо користувач перейшов за посиланням t.me/bot?start=123456
+    # Витягуємо ID реферера (якщо є): t.me/bot?start=123456
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
     referrer_id = int(args[0]) if args and args[0].isdigit() else None
     
@@ -134,10 +139,10 @@ async def cb_show_tariffs(callback: CallbackQuery):
         f"🎯 **Твій впевнений крок до 190+ на НМТ!**\n\n"
         f"Більшість втрачає бали не через незнання мови, а через пастки у форматах завдань. "
         f"Ми розробили систему, яка гарантує результат:\n\n"
-        f"✨ **Преміум-доступ у боті:**\n"
+        f"✨ **Преміум-доступ у боті (250 ⭐️ Stars):**\n"
+        f"• Безлімітна кількість тестових спроб щодня\n"
         f"• Повні авторські розбори кожної помилки\n"
-        f"• Симулятор завдань підвищеної складності (B2)\n"
-        f"• Особистий трекінг слабких тем\n\n"
+        f"• Персоналізований підбір слабких тем НМТ\n\n"
         f"🏛 **Школа Neta School (Повний курс):**\n"
         f"• Індивідуальна програма та супровід ментора\n"
         f"• Повна гарантія вступу на омріяний бюджет\n\n"
@@ -154,10 +159,43 @@ async def cb_show_tariffs(callback: CallbackQuery):
 async def cb_start_quiz_menu(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text(
-        "🧠 **Обери рівень складності тренування:**",
+        "🧠 **Обери розділ або формат тренування НМТ:**",
         reply_markup=get_difficulty_keyboard(),
         parse_mode="Markdown"
     )
+
+# ================= TELEGRAM STARS PAYMENT HANDLERS =================
+
+@router.callback_query(F.data == "buy_premium_stars")
+async def cb_buy_premium_stars(callback: CallbackQuery):
+    """Виставляє рахунок на 250 Telegram Stars."""
+    await callback.answer()
+    prices = [LabeledPrice(label="Преміум Доступ НМТ", amount=250)]
+    
+    await callback.message.answer_invoice(
+        title="NMT English Premium 🌟",
+        description="Безлімітні тести НМТ, персоналізована робота над помилками та розбір завдань.",
+        payload="premium_stars_pack",
+        currency="XTR",  # Код валюти Telegram Stars
+        prices=prices,
+        start_parameter="buy-premium-nmt"
+    )
+
+@router.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    """Підтверджує готовність до прийому платежу."""
+    await pre_checkout_query.answer(ok=True)
+
+@router.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    """Обробляє успішну оплату та активує Преміум."""
+    if message.successful_payment.invoice_payload == "premium_stars_pack":
+        await DBClient.grant_premium(message.from_user.id)
+        await message.answer(
+            "🎉 **Вітаємо! Преміум-доступ успішно активовано за 250 ⭐️ Stars!**\n\n"
+            "Тепер тобі доступне безлімітне складання тестів НМТ та адаптивне тренування.",
+            parse_mode="Markdown"
+        )
 
 # ================= ADMIN HANDLERS =================
 
@@ -184,11 +222,11 @@ async def cb_admin_stats(callback: CallbackQuery):
     
     stats_text = (
         f"📊 **Детальна статистика проекту:**\n\n"
-        f"👥 Всього користувачів: **{stats['total_users']}**\n"
-        f"🟢 Активні користувачі: **{stats.get('active_users', stats['total_users'])}**\n"
+        f"👥 Всього користувачів: **{stats.get('total_users', 0)}**\n"
+        f"🟢 Активні користувачі: **{stats.get('active_users', stats.get('total_users', 0))}**\n"
         f"🚫 Заблокували бота: **{stats.get('blocked_users', 0)}**\n"
-        f"👑 З активним Premium: **{stats['premium_users']}**\n\n"
-        f"📚 Питань у базі даних: **{stats['total_questions']}**"
+        f"👑 З активним Premium: **{stats.get('premium_users', 0)}**\n\n"
+        f"📚 Питань у базі даних: **{stats.get('total_questions', 0)}**"
     )
     
     await callback.message.edit_text(
@@ -211,7 +249,6 @@ async def cb_check_active(callback: CallbackQuery, bot: Bot):
 
     for u_id in user_ids:
         try:
-            # Використовуємо ping без відправки повідомлення користувачеві
             await bot.send_chat_action(chat_id=u_id, action="typing")
             await DBClient.set_user_active_status(u_id, True)
             active_count += 1
