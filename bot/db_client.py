@@ -1,300 +1,510 @@
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from datetime import datetime, date, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from supabase import Client, create_client
 
 from bot.config import (
-    DB_SEMAPHORE_LIMIT,
-    FREE_DAILY_TESTS,
     SUPABASE_KEY,
     SUPABASE_URL,
+    FREE_DAILY_QUIZ_LIMIT,
+    REFERRAL_PREMIUM_DAYS,
 )
 
 
 logger = logging.getLogger(__name__)
+
 
 supabase: Client = create_client(
     SUPABASE_URL,
     SUPABASE_KEY,
 )
 
-DB_SEMAPHORE = asyncio.Semaphore(DB_SEMAPHORE_LIMIT)
 
-T = TypeVar("T")
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def parse_datetime(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-
-    if isinstance(value, datetime):
-        result = value
-    else:
-        try:
-            result = datetime.fromisoformat(
-                str(value).replace("Z", "+00:00")
-            )
-        except ValueError:
-            return None
-
-    if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
-
-    return result.astimezone(timezone.utc)
-
-
-async def _run_db(operation: Callable[[], T]) -> T:
-    """
-    Виконує синхронний Supabase SDK у thread pool.
-
-    Semaphore обмежує кількість одночасних операцій,
-    щоб не створювати надмірне навантаження на Supabase.
-    """
-    async with DB_SEMAPHORE:
-        return await asyncio.to_thread(operation)
+DB_SEMAPHORE = asyncio.Semaphore(12)
 
 
 class DBClient:
-    """Асинхронна обгортка над синхронним Supabase SDK."""
+    """
+    Async wrapper around the synchronous Supabase client.
+
+    Supabase Python client is synchronous, therefore all SDK
+    operations are executed through asyncio.to_thread().
+
+    Semaphore protects the free Supabase instance from a large
+    number of concurrent requests.
+    """
+
+    @staticmethod
+    async def _run_sync(function):
+        async with DB_SEMAPHORE:
+            return await asyncio.to_thread(function)
+
+    # ========================================================
+    # USERS
+    # ========================================================
 
     @staticmethod
     async def get_or_create_user(
-        user_id: Optional[int] = None,
+        user_id: int,
         username: Optional[str] = None,
         first_name: Optional[str] = None,
         referrer_id: Optional[int] = None,
-        tg_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        Універсальний метод отримання/створення користувача.
 
-        tg_id залишений як compatibility alias для старого коду.
-        """
+        target_id = int(user_id)
 
-        target_id = user_id if user_id is not None else tg_id
-
-        if target_id is None:
-            raise ValueError("user_id не переданий.")
-
-        target_id = int(target_id)
-        now = utc_now()
-        today = now.date()
-
-        def _db_op() -> Dict[str, Any]:
+        def _db_op():
             result = (
                 supabase
                 .table("users")
                 .select("*")
-                .eq("user_id", target_id)
+                .eq("id", target_id)
                 .limit(1)
                 .execute()
             )
 
-            user = result.data[0] if result.data else None
+            data = result.data or []
 
-            if user is None:
-                new_user = {
-                    "user_id": target_id,
-                    "username": username or "",
-                    "first_name": first_name or "Учень",
-                    "daily_tests_left": FREE_DAILY_TESTS,
-                    "last_test_date": today.isoformat(),
-                    "is_premium": False,
-                    "premium_until": None,
-                    "is_active": True,
-                    "total_tests_passed": 0,
-                    "total_tasks_solved": 0,
-                    "streak": 1,
-                    "last_active_date": today.isoformat(),
-                    "last_active_at": now.isoformat(),
-                    "referrer_id": (
-                        int(referrer_id)
-                        if referrer_id and int(referrer_id) != target_id
-                        else None
-                    ),
-                    "referral_rewarded": False,
-                    "referrals_count": 0,
-                    "last_reminder_at": None,
-                }
+            if data:
+                user = data[0]
 
-                try:
-                    insert_result = (
+                updates: Dict[str, Any] = {}
+
+                if username is not None and username != user.get("username"):
+                    updates["username"] = username
+
+                if first_name is not None and first_name != user.get("first_name"):
+                    updates["first_name"] = first_name
+
+                if not user.get("is_active", True):
+                    updates["is_active"] = True
+
+                if updates:
+                    update_result = (
                         supabase
                         .table("users")
-                        .insert(new_user)
+                        .update(updates)
+                        .eq("id", target_id)
                         .execute()
                     )
 
-                    if insert_result.data:
-                        created = insert_result.data[0]
-                    else:
-                        created = new_user
+                    updated_data = update_result.data or []
 
-                    created["_is_new"] = True
-                    return created
+                    if updated_data:
+                        user = updated_data[0]
 
-                except Exception:
-                    # Можливий race condition при двох /start одночасно.
-                    retry = (
+                return user
+
+            clean_referrer = None
+
+            if referrer_id is not None:
+                referrer_id_int = int(referrer_id)
+
+                if referrer_id_int != target_id:
+                    ref_result = (
                         supabase
                         .table("users")
-                        .select("*")
-                        .eq("user_id", target_id)
+                        .select("id")
+                        .eq("id", referrer_id_int)
                         .limit(1)
                         .execute()
                     )
 
-                    if retry.data:
-                        user = retry.data[0]
-                    else:
-                        raise
+                    if ref_result.data:
+                        clean_referrer = referrer_id_int
 
-            updates: Dict[str, Any] = {}
+            new_user = {
+                "id": target_id,
+                "username": username or "",
+                "first_name": first_name or "Учень",
+                "level": 1,
+                "xp": 0,
+                "energy": 5,
+                "max_energy": 5,
+                "is_premium": False,
+                "mascot_skin": "default",
+                "referrer_id": clean_referrer,
+                "is_active": True,
+                "streak": 0,
+                "total_tasks_solved": 0,
+                "referrals_count": 0,
+                "referral_rewarded": False,
+                "premium_until": None,
+                "last_active_at": datetime.now(timezone.utc).isoformat(),
+                "last_streak_date": None,
+                "last_reminder_at": None,
+                "daily_quiz_count": 0,
+                "daily_quiz_date": str(date.today()),
+            }
 
-            existing_username = user.get("username")
-            existing_first_name = user.get("first_name")
+            insert_result = (
+                supabase
+                .table("users")
+                .insert(new_user)
+                .execute()
+            )
 
-            if username and username != existing_username:
-                updates["username"] = username
+            inserted_data = insert_result.data or []
 
-            if first_name and first_name != existing_first_name:
-                updates["first_name"] = first_name
+            if inserted_data:
+                return inserted_data[0]
 
-            if not user.get("is_active", True):
-                updates["is_active"] = True
+            return new_user
 
-            last_active_date_raw = user.get("last_active_date")
+        return await DBClient._run_sync(_db_op)
 
-            try:
-                last_active_date = (
-                    datetime.fromisoformat(
-                        str(last_active_date_raw)
-                    ).date()
-                    if last_active_date_raw
-                    else None
+    # ========================================================
+    # ACTIVITY / STREAK
+    # ========================================================
+
+    @staticmethod
+    async def record_activity(user_id: int) -> Dict[str, Any]:
+        """
+        Records current user activity and updates streak.
+
+        One activity per UTC calendar day increments streak.
+        Missing one or more days resets streak to 1.
+        """
+
+        target_id = int(user_id)
+        today = datetime.now(timezone.utc).date()
+
+        def _db_op():
+            result = (
+                supabase
+                .table("users")
+                .select(
+                    "id, streak, last_streak_date, last_active_at, is_active"
                 )
-            except ValueError:
-                last_active_date = None
+                .eq("id", target_id)
+                .limit(1)
+                .execute()
+            )
 
-            if last_active_date != today:
-                if last_active_date == today - timedelta(days=1):
-                    new_streak = int(user.get("streak") or 0) + 1
-                else:
-                    new_streak = 1
+            data = result.data or []
 
-                updates["streak"] = new_streak
-                updates["last_active_date"] = today.isoformat()
+            if not data:
+                return {}
 
-            updates["last_active_at"] = now.isoformat()
+            user = data[0]
 
-            premium_until = parse_datetime(user.get("premium_until"))
+            current_streak = int(user.get("streak") or 0)
 
-            if (
-                user.get("is_premium")
-                and premium_until
-                and premium_until <= now
-            ):
-                updates["is_premium"] = False
+            last_streak_date_raw = user.get(
+                "last_streak_date"
+            )
 
-            last_test_date = user.get("last_test_date")
+            if last_streak_date_raw:
+                try:
+                    last_date = date.fromisoformat(
+                        str(last_streak_date_raw)
+                    )
+                except ValueError:
+                    last_date = None
+            else:
+                last_date = None
 
-            if last_test_date != today.isoformat():
-                updates["daily_tests_left"] = FREE_DAILY_TESTS
-                updates["last_test_date"] = today.isoformat()
+            new_streak = current_streak
 
-            if updates:
-                update_result = (
-                    supabase
-                    .table("users")
-                    .update(updates)
-                    .eq("user_id", target_id)
-                    .execute()
-                )
+            if last_date == today:
+                new_streak = max(current_streak, 1)
 
-                if update_result.data:
-                    user = update_result.data[0]
-                else:
-                    user.update(updates)
+            elif last_date == today - timedelta(days=1):
+                new_streak = max(current_streak, 0) + 1
 
-            user["_is_new"] = False
+            else:
+                new_streak = 1
 
-            return user
+            updates = {
+                "last_active_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "last_streak_date": str(today),
+                "streak": new_streak,
+                "is_active": True,
+            }
 
-        return await _run_db(_db_op)
+            update_result = (
+                supabase
+                .table("users")
+                .update(updates)
+                .eq("id", target_id)
+                .execute()
+            )
+
+            updated_data = update_result.data or []
+
+            return (
+                updated_data[0]
+                if updated_data
+                else {
+                    **user,
+                    **updates,
+                }
+            )
+
+        return await DBClient._run_sync(_db_op)
+
+    # ========================================================
+    # PREMIUM
+    # ========================================================
 
     @staticmethod
     async def grant_premium(
         user_id: int,
         days: int,
-    ) -> Optional[datetime]:
-        """Додає Premium на вказану кількість днів."""
+    ) -> Dict[str, Any]:
 
         if days <= 0:
-            raise ValueError("Кількість днів Premium повинна бути > 0.")
+            raise ValueError("Кількість Premium-днів має бути > 0.")
 
-        user_id = int(user_id)
-        now = utc_now()
+        target_id = int(user_id)
 
-        def _db_op() -> Optional[datetime]:
+        def _db_op():
             result = (
                 supabase
                 .table("users")
-                .select("premium_until")
-                .eq("user_id", user_id)
+                .select("id, is_premium, premium_until")
+                .eq("id", target_id)
                 .limit(1)
                 .execute()
             )
 
-            current_until = None
+            data = result.data or []
 
-            if result.data:
-                current_until = parse_datetime(
-                    result.data[0].get("premium_until")
+            if not data:
+                raise ValueError(
+                    f"Користувач {target_id} не знайдений."
                 )
 
-            base = (
-                current_until
-                if current_until and current_until > now
+            user = data[0]
+
+            now = datetime.now(timezone.utc)
+
+            existing_until = None
+            raw_until = user.get("premium_until")
+
+            if raw_until:
+                try:
+                    existing_until = datetime.fromisoformat(
+                        str(raw_until).replace("Z", "+00:00")
+                    )
+
+                    if existing_until.tzinfo is None:
+                        existing_until = existing_until.replace(
+                            tzinfo=timezone.utc
+                        )
+
+                except ValueError:
+                    existing_until = None
+
+            base_date = (
+                existing_until
+                if existing_until and existing_until > now
                 else now
             )
 
-            new_until = base + timedelta(days=days)
+            new_until = base_date + timedelta(days=days)
+
+            updates = {
+                "is_premium": True,
+                "premium_until": new_until.isoformat(),
+            }
+
+            update_result = (
+                supabase
+                .table("users")
+                .update(updates)
+                .eq("id", target_id)
+                .execute()
+            )
+
+            updated_data = update_result.data or []
+
+            if updated_data:
+                return updated_data[0]
+
+            return {
+                **user,
+                **updates,
+            }
+
+        return await DBClient._run_sync(_db_op)
+
+    @staticmethod
+    async def refresh_premium_status(
+        user_id: int,
+    ) -> Dict[str, Any]:
+
+        target_id = int(user_id)
+        now = datetime.now(timezone.utc)
+
+        def _db_op():
+            result = (
+                supabase
+                .table("users")
+                .select("*")
+                .eq("id", target_id)
+                .limit(1)
+                .execute()
+            )
+
+            data = result.data or []
+
+            if not data:
+                return {}
+
+            user = data[0]
+
+            raw_until = user.get("premium_until")
+
+            if not raw_until:
+                return user
+
+            try:
+                premium_until = datetime.fromisoformat(
+                    str(raw_until).replace("Z", "+00:00")
+                )
+
+                if premium_until.tzinfo is None:
+                    premium_until = premium_until.replace(
+                        tzinfo=timezone.utc
+                    )
+
+            except ValueError:
+                return user
+
+            if premium_until <= now and user.get("is_premium"):
+                update_result = (
+                    supabase
+                    .table("users")
+                    .update({"is_premium": False})
+                    .eq("id", target_id)
+                    .execute()
+                )
+
+                updated_data = update_result.data or []
+
+                if updated_data:
+                    return updated_data[0]
+
+                user["is_premium"] = False
+
+            return user
+
+        return await DBClient._run_sync(_db_op)
+
+    # ========================================================
+    # QUIZ LIMIT
+    # ========================================================
+
+    @staticmethod
+    async def can_start_quiz(
+        user_id: int,
+    ) -> bool:
+
+        target_id = int(user_id)
+        today = date.today()
+
+        def _db_op():
+            result = (
+                supabase
+                .table("users")
+                .select(
+                    "is_premium, daily_quiz_count, daily_quiz_date"
+                )
+                .eq("id", target_id)
+                .limit(1)
+                .execute()
+            )
+
+            data = result.data or []
+
+            if not data:
+                return False
+
+            user = data[0]
+
+            if user.get("is_premium"):
+                return True
+
+            raw_date = user.get("daily_quiz_date")
+
+            if raw_date != str(today):
+                return True
+
+            count = int(
+                user.get("daily_quiz_count") or 0
+            )
+
+            return count < FREE_DAILY_QUIZ_LIMIT
+
+        return await DBClient._run_sync(_db_op)
+
+    @staticmethod
+    async def consume_quiz_attempt(
+        user_id: int,
+    ) -> bool:
+
+        target_id = int(user_id)
+        today = date.today()
+
+        def _db_op():
+            result = (
+                supabase
+                .table("users")
+                .select(
+                    "is_premium, daily_quiz_count, daily_quiz_date"
+                )
+                .eq("id", target_id)
+                .limit(1)
+                .execute()
+            )
+
+            data = result.data or []
+
+            if not data:
+                return False
+
+            user = data[0]
+
+            if user.get("is_premium"):
+                return True
+
+            current_date = user.get("daily_quiz_date")
+            current_count = int(
+                user.get("daily_quiz_count") or 0
+            )
+
+            if current_date != str(today):
+                current_count = 0
+
+            if current_count >= FREE_DAILY_QUIZ_LIMIT:
+                return False
 
             update_result = (
                 supabase
                 .table("users")
                 .update(
                     {
-                        "is_premium": True,
-                        "premium_until": new_until.isoformat(),
+                        "daily_quiz_date": str(today),
+                        "daily_quiz_count": current_count + 1,
                     }
                 )
-                .eq("user_id", user_id)
+                .eq("id", target_id)
                 .execute()
             )
 
-            if not update_result.data:
-                raise RuntimeError(
-                    f"Не вдалося активувати Premium для {user_id}."
-                )
+            return bool(update_result.data)
 
-            logger.info(
-                "Premium granted: user=%s days=%s until=%s",
-                user_id,
-                days,
-                new_until.isoformat(),
-            )
+        return await DBClient._run_sync(_db_op)
 
-            return new_until
-
-        return await _run_db(_db_op)
+    # ========================================================
+    # QUESTIONS
+    # ========================================================
 
     @staticmethod
     async def add_task(
@@ -306,56 +516,68 @@ class DBClient:
         correct_answer: str,
         explanation: str = "",
     ) -> Dict[str, Any]:
-        """Додає завдання в таблицю tasks."""
 
-        valid_categories = {
-            "Reading",
-            "Use of English",
-            "Персональний симулятор помилок (190+)",
+        correct_answer = correct_answer.upper().strip()
+
+        answer_map = {
+            "A": 0,
+            "B": 1,
+            "C": 2,
+            "D": 3,
         }
 
-        category = category.strip()
-        correct_answer = correct_answer.strip().upper()
-
-        if category not in valid_categories:
+        if correct_answer not in answer_map:
             raise ValueError(
-                "Невірна категорія. Дозволено: "
-                "Reading, Use of English, "
-                "Персональний симулятор помилок (190+)."
+                "correct_answer має бути A, B, C або D."
             )
 
-        if correct_answer not in {"A", "B", "C", "D"}:
-            raise ValueError("correct_answer повинен бути A/B/C/D.")
-
-        if set(options.keys()) != {"A", "B", "C", "D"}:
+        if len(options) != 4:
             raise ValueError(
-                "Потрібно передати рівно чотири варіанти A/B/C/D."
+                "Питання повинно мати рівно 4 варіанти."
             )
 
-        def _db_op() -> Dict[str, Any]:
+        clean_options = {
+            "A": str(options.get("A", "")).strip(),
+            "B": str(options.get("B", "")).strip(),
+            "C": str(options.get("C", "")).strip(),
+            "D": str(options.get("D", "")).strip(),
+        }
+
+        if any(not value for value in clean_options.values()):
+            raise ValueError(
+                "Усі чотири варіанти відповідей повинні бути заповнені."
+            )
+
+        def _db_op():
+            payload = {
+                "topic": category,
+                "difficulty": 1,
+                "question_text": question_text.strip(),
+                "options": clean_options,
+                "correct_option": answer_map[correct_answer],
+                "explanation": explanation.strip(),
+                "category": category,
+                "sub_category": sub_category.strip(),
+                "section": section.strip() or "NMT",
+            }
+
             result = (
                 supabase
-                .table("tasks")
-                .insert(
-                    {
-                        "category": category,
-                        "sub_category": sub_category.strip(),
-                        "section": section.strip() or "NMT",
-                        "question_text": question_text.strip(),
-                        "options": options,
-                        "correct_answer": correct_answer,
-                        "explanation": explanation.strip(),
-                    }
-                )
+                .table("questions")
+                .insert(payload)
                 .execute()
             )
 
-            if not result.data:
-                raise RuntimeError("Supabase не повернув створене питання.")
+            data = result.data or []
 
-            return result.data[0]
+            if not data:
+                raise RuntimeError(
+                    "Supabase не повернув створене питання."
+                )
 
-        return await _run_db(_db_op)
+            return data[0]
+
+        return await DBClient._run_sync(_db_op)
 
     @staticmethod
     async def get_personalized_tasks(
@@ -363,660 +585,502 @@ class DBClient:
         category: str,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """
-        Повертає питання з пріоритетом помилок користувача.
 
-        Для персонального симулятора бере всі три блоки.
-        """
+        target_id = int(user_id)
+        safe_limit = max(1, min(int(limit), 20))
 
-        user_id = int(user_id)
-        limit = max(1, min(int(limit), 20))
+        def _db_op():
+            question_result = (
+                supabase
+                .table("questions")
+                .select("*")
+                .eq("category", category)
+                .limit(100)
+                .execute()
+            )
 
-        def _db_op() -> List[Dict[str, Any]]:
-            if category == "personalized":
-                task_query = (
-                    supabase
-                    .table("tasks")
-                    .select("*")
-                    .eq("section", "NMT")
-                )
-            else:
-                task_query = (
-                    supabase
-                    .table("tasks")
-                    .select("*")
-                    .eq("category", category)
-                )
+            all_questions = question_result.data or []
 
-            tasks_result = task_query.execute()
-            all_tasks = tasks_result.data or []
-
-            if not all_tasks:
+            if not all_questions:
                 return []
 
-            attempts_result = (
+            answer_result = (
                 supabase
-                .table("user_attempts")
-                .select("task_id,is_correct")
-                .eq("user_id", user_id)
+                .table("user_answers")
+                .select("question_id, is_correct")
+                .eq("user_id", target_id)
+                .limit(1000)
                 .execute()
             )
+
+            attempts = answer_result.data or []
 
             wrong_ids = {
-                int(item["task_id"])
-                for item in (attempts_result.data or [])
+                str(item.get("question_id"))
+                for item in attempts
                 if not item.get("is_correct")
-                and item.get("task_id") is not None
             }
 
-            wrong_tasks = [
-                task
-                for task in all_tasks
-                if int(task["id"]) in wrong_ids
+            random.shuffle(all_questions)
+
+            wrong_questions = [
+                question
+                for question in all_questions
+                if str(question.get("id")) in wrong_ids
             ]
 
-            other_tasks = [
-                task
-                for task in all_tasks
-                if int(task["id"]) not in wrong_ids
+            other_questions = [
+                question
+                for question in all_questions
+                if str(question.get("id")) not in wrong_ids
             ]
 
-            random.shuffle(wrong_tasks)
-            random.shuffle(other_tasks)
+            random.shuffle(wrong_questions)
+            random.shuffle(other_questions)
 
-            return (wrong_tasks + other_tasks)[:limit]
+            result = (
+                wrong_questions[:safe_limit]
+                + other_questions
+            )
 
-        return await _run_db(_db_op)
+            return result[:safe_limit]
+
+        return await DBClient._run_sync(_db_op)
 
     @staticmethod
-    async def get_express_tasks(limit: int = 5) -> List[Dict[str, Any]]:
-        """Повертає короткий стартовий набір із двох основних блоків."""
+    async def get_random_question(
+        category: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
 
-        limit = max(3, min(int(limit), 5))
-
-        def _db_op() -> List[Dict[str, Any]]:
-            result = (
+        def _db_op():
+            query = (
                 supabase
-                .table("tasks")
+                .table("questions")
                 .select("*")
-                .in_(
-                    "category",
-                    ["Reading", "Use of English"],
-                )
-                .execute()
             )
 
-            tasks = result.data or []
-            random.shuffle(tasks)
-
-            return tasks[:limit]
-
-        return await _run_db(_db_op)
-
-    @staticmethod
-    async def decrease_test_limit(
-        user_id: int,
-        current_left: int,
-    ) -> bool:
-        """Сумісність зі старою логікою."""
-
-        user_id = int(user_id)
-
-        def _db_op() -> bool:
-            new_value = max(0, int(current_left) - 1)
+            if category:
+                query = query.eq("category", category)
 
             result = (
-                supabase
-                .table("users")
-                .update({"daily_tests_left": new_value})
-                .eq("user_id", user_id)
+                query
+                .limit(30)
                 .execute()
             )
 
-            return bool(result.data)
+            data = result.data or []
 
-        return await _run_db(_db_op)
+            if not data:
+                return None
 
-    @staticmethod
-    async def consume_test(
-        user_id: int,
-    ) -> bool:
-        """
-        Атомарно намагається списати одну безкоштовну спробу
-        через SQL RPC.
+            return random.choice(data)
 
-        Premium-користувачі не обмежуються.
-        """
+        return await DBClient._run_sync(_db_op)
 
-        user_id = int(user_id)
-
-        def _db_op() -> bool:
-            result = supabase.rpc(
-                "consume_daily_test",
-                {"p_user_id": user_id},
-            ).execute()
-
-            if isinstance(result.data, bool):
-                return result.data
-
-            if isinstance(result.data, list) and result.data:
-                value = result.data[0]
-
-                if isinstance(value, dict):
-                    return bool(
-                        value.get("consume_daily_test", False)
-                    )
-
-                return bool(value)
-
-            return False
-
-        try:
-            return await _run_db(_db_op)
-        except Exception as exc:
-            logger.exception(
-                "consume_daily_test RPC failed for user %s: %s",
-                user_id,
-                exc,
-            )
-
-            # Безпечний fallback.
-            user = await DBClient.get_or_create_user(
-                user_id=user_id
-            )
-
-            if user.get("is_premium"):
-                return True
-
-            left = int(user.get("daily_tests_left") or 0)
-
-            if left <= 0:
-                return False
-
-            return await DBClient.decrease_test_limit(
-                user_id,
-                left,
-            )
+    # ========================================================
+    # ANSWERS
+    # ========================================================
 
     @staticmethod
     async def save_attempt(
         user_id: int,
-        task_id: int,
-        answer: str,
+        question_id: str,
+        answer: int,
         is_correct: bool,
-    ) -> bool:
-        """Зберігає відповідь користувача."""
+    ) -> None:
 
-        user_id = int(user_id)
-        task_id = int(task_id)
+        target_id = int(user_id)
 
-        def _db_op() -> bool:
-            attempt_result = (
+        def _db_op():
+            answer_result = (
                 supabase
-                .table("user_attempts")
+                .table("user_answers")
                 .insert(
                     {
-                        "user_id": user_id,
-                        "task_id": task_id,
-                        "selected_answer": answer.upper(),
+                        "user_id": target_id,
+                        "question_id": question_id,
                         "is_correct": bool(is_correct),
                     }
                 )
                 .execute()
             )
 
-            if not attempt_result.data:
-                return False
+            if not answer_result.data:
+                raise RuntimeError(
+                    "Не вдалося зберегти відповідь користувача."
+                )
 
-            # Один додатковий update. На Free tier це все ще
-            # контрольований semaphore-ом запит.
             user_result = (
                 supabase
                 .table("users")
-                .select("total_tasks_solved")
-                .eq("user_id", user_id)
+                .select("total_tasks_solved, xp")
+                .eq("id", target_id)
                 .limit(1)
                 .execute()
             )
 
-            if user_result.data:
-                current = int(
-                    user_result.data[0].get("total_tasks_solved") or 0
-                )
+            user_data = user_result.data or []
 
-                (
-                    supabase
-                    .table("users")
-                    .update(
-                        {
-                            "total_tasks_solved": current + 1,
-                            "last_active_at": utc_now().isoformat(),
-                        }
-                    )
-                    .eq("user_id", user_id)
-                    .execute()
-                )
+            if not user_data:
+                return
 
-            return True
+            user = user_data[0]
 
-        return await _run_db(_db_op)
-
-    @staticmethod
-    async def complete_test(
-        user_id: int,
-    ) -> None:
-        """Збільшує лічильник завершених тестів."""
-
-        user_id = int(user_id)
-
-        def _db_op() -> None:
-            result = (
-                supabase
-                .table("users")
-                .select("total_tests_passed")
-                .eq("user_id", user_id)
-                .limit(1)
-                .execute()
+            current_tasks = int(
+                user.get("total_tasks_solved") or 0
             )
 
-            current = 0
-
-            if result.data:
-                current = int(
-                    result.data[0].get("total_tests_passed") or 0
-                )
-
-            (
-                supabase
-                .table("users")
-                .update(
-                    {
-                        "total_tests_passed": current + 1,
-                        "last_active_at": utc_now().isoformat(),
-                    }
-                )
-                .eq("user_id", user_id)
-                .execute()
+            current_xp = int(
+                user.get("xp") or 0
             )
 
-        await _run_db(_db_op)
+            xp_gain = 10 if is_correct else 3
+
+            supabase.table("users").update(
+                {
+                    "total_tasks_solved": current_tasks + 1,
+                    "xp": current_xp + xp_gain,
+                }
+            ).eq(
+                "id",
+                target_id,
+            ).execute()
+
+        await DBClient._run_sync(_db_op)
+
+    # ========================================================
+    # REFERRALS
+    # ========================================================
 
     @staticmethod
     async def process_referral(
         new_user_id: int,
-        referrer_id: int,
+        referrer_id: Optional[int],
     ) -> bool:
-        """
-        Прив'язує нового користувача до реферера.
 
-        Premium не видається тут: нагорода видається тільки
-        після першого завершеного тесту.
-        """
-
-        new_user_id = int(new_user_id)
-        referrer_id = int(referrer_id)
-
-        if new_user_id == referrer_id:
+        if not referrer_id:
             return False
 
-        def _db_op() -> bool:
-            result = (
+        new_id = int(new_user_id)
+        ref_id = int(referrer_id)
+
+        if new_id == ref_id:
+            return False
+
+        def _db_op():
+            new_result = (
                 supabase
                 .table("users")
-                .select("referrer_id")
-                .eq("user_id", new_user_id)
+                .select(
+                    "id, referrer_id, referral_rewarded"
+                )
+                .eq("id", new_id)
                 .limit(1)
                 .execute()
             )
 
-            if not result.data:
+            new_data = new_result.data or []
+
+            if not new_data:
                 return False
 
-            current_referrer = result.data[0].get("referrer_id")
+            new_user = new_data[0]
 
-            if current_referrer:
+            if new_user.get("referrer_id") != ref_id:
+                return False
+
+            if new_user.get("referral_rewarded"):
                 return False
 
             referrer_result = (
                 supabase
                 .table("users")
-                .select("user_id")
-                .eq("user_id", referrer_id)
+                .select(
+                    "id, referrals_count, is_premium, premium_until"
+                )
+                .eq("id", ref_id)
                 .limit(1)
                 .execute()
             )
 
-            if not referrer_result.data:
+            referrer_data = referrer_result.data or []
+
+            if not referrer_data:
                 return False
 
-            update_result = (
-                supabase
-                .table("users")
-                .update({"referrer_id": referrer_id})
-                .eq("user_id", new_user_id)
-                .is_("referrer_id", "null")
-                .execute()
+            referrer = referrer_data[0]
+
+            now = datetime.now(timezone.utc)
+
+            existing_until = None
+            raw_until = referrer.get("premium_until")
+
+            if raw_until:
+                try:
+                    existing_until = datetime.fromisoformat(
+                        str(raw_until).replace("Z", "+00:00")
+                    )
+
+                    if existing_until.tzinfo is None:
+                        existing_until = existing_until.replace(
+                            tzinfo=timezone.utc
+                        )
+
+                except ValueError:
+                    existing_until = None
+
+            base_date = (
+                existing_until
+                if existing_until and existing_until > now
+                else now
             )
 
-            return bool(update_result.data)
-
-        return await _run_db(_db_op)
-
-    @staticmethod
-    async def complete_referral(
-        new_user_id: int,
-    ) -> Optional[int]:
-        """
-        Видає рефереру +3 дні Premium після першого завершеного тесту.
-
-        Повертає ID реферера, якщо нагороду видано.
-        """
-
-        new_user_id = int(new_user_id)
-
-        def _db_op() -> Optional[int]:
-            result = (
-                supabase
-                .table("users")
-                .select("referrer_id,referral_rewarded")
-                .eq("user_id", new_user_id)
-                .limit(1)
-                .execute()
+            new_premium_until = (
+                base_date
+                + timedelta(days=REFERRAL_PREMIUM_DAYS)
             )
 
-            if not result.data:
-                return None
+            new_referral_count = int(
+                referrer.get("referrals_count") or 0
+            ) + 1
 
-            user = result.data[0]
-            referrer_id = user.get("referrer_id")
-
-            if not referrer_id or user.get("referral_rewarded"):
-                return None
-
-            lock_result = (
-                supabase
-                .table("users")
-                .update({"referral_rewarded": True})
-                .eq("user_id", new_user_id)
-                .eq("referral_rewarded", False)
-                .execute()
-            )
-
-            if not lock_result.data:
-                return None
-
-            referrer_result = (
-                supabase
-                .table("users")
-                .select("referrals_count")
-                .eq("user_id", int(referrer_id))
-                .limit(1)
-                .execute()
-            )
-
-            if not referrer_result.data:
-                return None
-
-            current_count = int(
-                referrer_result.data[0].get("referrals_count") or 0
-            )
-
-            (
+            update_referrer = (
                 supabase
                 .table("users")
                 .update(
                     {
-                        "referrals_count": current_count + 1,
+                        "referrals_count": new_referral_count,
+                        "is_premium": True,
+                        "premium_until": new_premium_until.isoformat(),
                     }
                 )
-                .eq("user_id", int(referrer_id))
+                .eq("id", ref_id)
                 .execute()
             )
 
-            return int(referrer_id)
+            if not update_referrer.data:
+                return False
 
-        referrer_id = await _run_db(_db_op)
-
-        if referrer_id:
-            await DBClient.grant_premium(
-                referrer_id,
-                days=3,
+            update_new_user = (
+                supabase
+                .table("users")
+                .update(
+                    {
+                        "referral_rewarded": True,
+                    }
+                )
+                .eq("id", new_id)
+                .execute()
             )
 
-        return referrer_id
+            return bool(update_new_user.data)
+
+        return await DBClient._run_sync(_db_op)
+
+    # ========================================================
+    # ADMIN
+    # ========================================================
 
     @staticmethod
     async def get_all_user_ids() -> List[int]:
-        """Повертає активних користувачів для аудиту."""
 
-        def _db_op() -> List[int]:
+        def _db_op():
             result = (
                 supabase
                 .table("users")
-                .select("user_id")
+                .select("id")
                 .eq("is_active", True)
+                .limit(10000)
                 .execute()
             )
 
+            data = result.data or []
+
             return [
-                int(item["user_id"])
-                for item in (result.data or [])
-                if item.get("user_id") is not None
+                int(item["id"])
+                for item in data
+                if item.get("id") is not None
             ]
 
-        return await _run_db(_db_op)
+        return await DBClient._run_sync(_db_op)
 
     @staticmethod
     async def set_user_active_status(
         user_id: int,
         is_active: bool,
-    ) -> bool:
-        """Змінює активність користувача."""
+    ) -> None:
 
-        def _db_op() -> bool:
-            result = (
-                supabase
-                .table("users")
-                .update({"is_active": bool(is_active)})
-                .eq("user_id", int(user_id))
-                .execute()
-            )
+        target_id = int(user_id)
 
-            return bool(result.data)
-
-        return await _run_db(_db_op)
-
-    @staticmethod
-    async def get_admin_stats() -> Dict[str, int]:
-        """Статистика без завантаження всього контенту в пам'ять."""
-
-        def _db_op() -> Dict[str, int]:
-            users_result = (
-                supabase
-                .table("users")
-                .select(
-                    "user_id,is_active,is_premium,premium_until"
-                )
-                .execute()
-            )
-
-            tasks_result = (
-                supabase
-                .table("tasks")
-                .select("id")
-                .execute()
-            )
-
-            users = users_result.data or []
-            tasks = tasks_result.data or []
-
-            now = utc_now()
-
-            premium_users = 0
-
-            for user in users:
-                premium_until = parse_datetime(
-                    user.get("premium_until")
-                )
-
-                if (
-                    user.get("is_premium")
-                    and (
-                        premium_until is None
-                        or premium_until > now
-                    )
-                ):
-                    premium_users += 1
-
-            total_users = len(users)
-
-            return {
-                "total_users": total_users,
-                "active_users": sum(
-                    1 for user in users
-                    if user.get("is_active", True)
-                ),
-                "blocked_users": sum(
-                    1 for user in users
-                    if not user.get("is_active", True)
-                ),
-                "premium_users": premium_users,
-                "total_questions": len(tasks),
-            }
-
-        return await _run_db(_db_op)
-
-    @staticmethod
-    async def get_retention_candidates(
-        limit: int = 100,
-    ) -> List[Dict[str, Any]]:
-        """Знаходить користувачів, які не заходили понад 24 години."""
-
-        cutoff = utc_now() - timedelta(hours=24)
-
-        def _db_op() -> List[Dict[str, Any]]:
-            result = (
-                supabase
-                .table("users")
-                .select(
-                    "user_id,last_active_at,last_reminder_at"
-                )
-                .eq("is_active", True)
-                .lt("last_active_at", cutoff.isoformat())
-                .limit(limit)
-                .execute()
-            )
-
-            candidates: List[Dict[str, Any]] = []
-
-            for user in result.data or []:
-                last_reminder = parse_datetime(
-                    user.get("last_reminder_at")
-                )
-
-                if (
-                    last_reminder is None
-                    or last_reminder <= cutoff
-                ):
-                    candidates.append(user)
-
-            return candidates
-
-        return await _run_db(_db_op)
-
-    @staticmethod
-    async def set_last_reminder(
-        user_id: int,
-    ) -> bool:
-        def _db_op() -> bool:
+        def _db_op():
             result = (
                 supabase
                 .table("users")
                 .update(
                     {
-                        "last_reminder_at": utc_now().isoformat()
+                        "is_active": bool(is_active)
                     }
                 )
-                .eq("user_id", int(user_id))
+                .eq("id", target_id)
                 .execute()
             )
 
-            return bool(result.data)
+            if not result.data:
+                logger.warning(
+                    "Не вдалося оновити active status для %s",
+                    target_id,
+                )
 
-        return await _run_db(_db_op)
+        await DBClient._run_sync(_db_op)
 
     @staticmethod
-    async def get_user_profile(
-        user_id: int,
-    ) -> Dict[str, Any]:
-        def _db_op() -> Dict[str, Any]:
-            result = (
+    async def get_admin_stats() -> Dict[str, int]:
+
+        def _db_op():
+            users_result = (
                 supabase
                 .table("users")
                 .select(
-                    "user_id,username,first_name,"
-                    "is_premium,premium_until,"
-                    "total_tasks_solved,total_tests_passed,"
-                    "streak,referrals_count"
+                    "id, is_active, is_premium, premium_until, referrals_count"
                 )
-                .eq("user_id", int(user_id))
-                .limit(1)
+                .limit(10000)
                 .execute()
             )
 
-            return result.data[0] if result.data else {}
+            questions_result = (
+                supabase
+                .table("questions")
+                .select("id")
+                .limit(10000)
+                .execute()
+            )
 
-        return await _run_db(_db_op)
+            users = users_result.data or []
+            questions = questions_result.data or []
+
+            now = datetime.now(timezone.utc)
+
+            premium_users = 0
+
+            for user in users:
+                if not user.get("is_premium"):
+                    continue
+
+                raw_until = user.get("premium_until")
+
+                if not raw_until:
+                    premium_users += 1
+                    continue
+
+                try:
+                    until = datetime.fromisoformat(
+                        str(raw_until).replace("Z", "+00:00")
+                    )
+
+                    if until.tzinfo is None:
+                        until = until.replace(
+                            tzinfo=timezone.utc
+                        )
+
+                    if until > now:
+                        premium_users += 1
+
+                except ValueError:
+                    premium_users += 1
+
+            active_users = sum(
+                1
+                for user in users
+                if user.get("is_active", True)
+            )
+
+            blocked_users = len(users) - active_users
+
+            referrals = sum(
+                int(user.get("referrals_count") or 0)
+                for user in users
+            )
+
+            return {
+                "total_users": len(users),
+                "active_users": active_users,
+                "blocked_users": blocked_users,
+                "premium_users": premium_users,
+                "total_questions": len(questions),
+                "total_referrals": referrals,
+            }
+
+        return await DBClient._run_sync(_db_op)
+
+    # ========================================================
+    # DAILY RETENTION
+    # ========================================================
 
     @staticmethod
-    async def register_payment(
+    async def get_daily_reminder_candidates(
+        hours: int = 24,
+        limit: int = 100,
+    ) -> List[int]:
+
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=hours)
+        )
+
+        def _db_op():
+            result = (
+                supabase
+                .table("users")
+                .select("id")
+                .eq("is_active", True)
+                .lt(
+                    "last_active_at",
+                    cutoff.isoformat(),
+                )
+                .limit(limit)
+                .execute()
+            )
+
+            data = result.data or []
+
+            return [
+                int(item["id"])
+                for item in data
+                if item.get("id") is not None
+            ]
+
+        return await DBClient._run_sync(_db_op)
+
+    @staticmethod
+    async def mark_reminder_sent(
         user_id: int,
-        payload: str,
-        charge_id: str,
-        amount: int,
-    ) -> bool:
-        """
-        Реєструє Telegram Stars payment.
+    ) -> None:
 
-        UNIQUE(charge_id) у БД захищає від повторного нарахування.
-        """
+        target_id = int(user_id)
 
-        def _db_op() -> bool:
-            try:
-                result = (
-                    supabase
-                    .table("payments")
-                    .insert(
-                        {
-                            "user_id": int(user_id),
-                            "payload": payload,
-                            "telegram_payment_charge_id": charge_id,
-                            "amount": int(amount),
-                            "currency": "XTR",
-                        }
-                    )
-                    .execute()
+        def _db_op():
+            result = (
+                supabase
+                .table("users")
+                .update(
+                    {
+                        "last_reminder_at": datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                    }
                 )
+                .eq("id", target_id)
+                .execute()
+            )
 
-                return bool(result.data)
-
-            except Exception as exc:
-                # Найчастіший випадок тут — duplicate charge_id.
+            if not result.data:
                 logger.warning(
-                    "Payment already registered or rejected: %s",
-                    exc,
+                    "Не вдалося записати reminder для %s",
+                    target_id,
                 )
-                return False
 
-        return await _run_db(_db_op)
+        await DBClient._run_sync(_db_op)
 
 
+# Compatibility instance
 db_client = DBClient()
-
-get_or_create_user = DBClient.get_or_create_user
-mark_user_inactive = lambda user_id: DBClient.set_user_active_status(
-    user_id,
-    False,
-)
-decrease_test_limit = DBClient.decrease_test_limit
-save_attempt = DBClient.save_attempt
