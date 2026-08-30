@@ -7,7 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import BOT_TOKEN, ADMIN_IDS
 from bot.handlers import router as main_router
-from bot.admin import router as admin_router  # Імпортуємо адмін-роутер
+from bot.admin import admin_router
 from bot.middlewares import AntiSpamMiddleware
 from bot.db_client import DBClient
 
@@ -40,7 +40,7 @@ async def main():
     dp.message.middleware(antispam_middleware)
     dp.callback_query.middleware(antispam_middleware)
 
-    # Підключення роутерів (Адмінський підключаємо першим)
+    # Підключення роутерів: адмінський першим, щоб команди мали пріоритет
     dp.include_router(admin_router)
     dp.include_router(main_router)
 
