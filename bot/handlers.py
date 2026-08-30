@@ -2,6 +2,8 @@ import asyncio
 import logging
 from typing import Any, Optional
 
+from aiogram.types import InlineKeyboardButton
+
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
@@ -615,16 +617,16 @@ async def show_referral(
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                {
-                    "text": "📤 Поділитися",
-                    "url": share_url,
-                }
+                InlineKeyboardButton(
+                    text="📤 Поділитися",
+                    url=share_url,
+                )
             ],
             [
-                {
-                    "text": "⬅️ Профіль",
-                    "callback_data": "show_profile",
-                }
+                InlineKeyboardButton(
+                    text="⬅️ Профіль",
+                    callback_data="show_profile",
+                )
             ],
         ]
     )
