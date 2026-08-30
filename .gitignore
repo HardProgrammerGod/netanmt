@@ -1,35 +1,44 @@
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
 
+# Virtual environments
 .venv/
 venv/
 env/
-ENV/
 
+# Environment variables
 .env
 .env.*
 !.env.example
 
+# IDE
 .idea/
 .vscode/
 
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test/cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-*.log
-
-.DS_Store
-
-dist/
+# Build
 build/
+dist/
 *.egg-info/
 
-.coverage
-htmlcov/
-
+# Local database / temporary files
 *.sqlite
+*.sqlite3
 *.db
 
-node_modules/
+# Secrets
+secrets/
