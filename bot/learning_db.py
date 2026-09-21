@@ -704,6 +704,7 @@ class LearningDB:
             .update({"clicked_at": now})
             .eq("user_id", int(user_id))
             .eq("target_session_id", str(session_id))
+            .eq("segment", "first_question")
             .eq("status", "sent")
             .is_("clicked_at", "null")
             .execute()
