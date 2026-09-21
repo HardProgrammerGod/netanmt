@@ -395,7 +395,7 @@ async def process_explanation(
             reply_markup=get_admin_keyboard(),
         )
 
-    except Exception as error:
+    except Exception:
         logger.exception(
             "Помилка додавання питання."
         )
@@ -521,8 +521,34 @@ async def admin_growth_funnel(
         "Повернення після повідомлення — зв’язок у часі, а не доказ його впливу.",
         f"Помилки/blocked: {data.get('reminders_failed',0)} · невідомий результат: {data.get('reminders_unknown',0)}",
         f"Вимкнули нагадування (людей): {data.get('disabled',0)}",
-        "\n<b>Джерела нових /start</b>",
     ]
+
+    campaigns = data.get("reminder_campaigns") or []
+    if campaigns:
+        segment_names = {
+            "abandoned": "Продовження сесії",
+            "first_question": "Перше питання",
+            "daily_errors": "Повторення помилок",
+            "reactivation": "Реактивація",
+            "daily_ready": "Daily",
+        }
+        lines.append("\n<b>За текстами v12</b>")
+        for row in campaigns[:12]:
+            segment = str(row.get("segment") or "unknown")
+            variant = html.escape(str(row.get("variant") or "a").upper())
+            label = html.escape(segment_names.get(segment, segment))
+            sent_count = int(row.get("sent") or 0)
+            click_count = int(row.get("clicked") or 0)
+            return_count = int(row.get("completed_24h") or 0)
+            blocked_count = int(row.get("blocked") or 0)
+            lines.append(
+                f"• {label} · {variant}: <b>{sent_count}</b> sent · "
+                f"{_percent(click_count, sent_count)} click · "
+                f"{_percent(return_count, sent_count)} lesson · "
+                f"{blocked_count} blocked"
+            )
+
+    lines.append("\n<b>Джерела нових /start</b>")
     sources = sorted((data.get("sources") or {}).items(), key=lambda x: x[1], reverse=True)
     lines += [f"• {html.escape(str(source)[:80])}: {count}" for source,count in sources[:8]] or ["—"]
     lines += ["\nСесії intro/Daily рахуються за learning_sessions. Старі події іншої версії не змішуються з ними."]
