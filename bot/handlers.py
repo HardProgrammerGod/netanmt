@@ -10,7 +10,6 @@ from bot.retention import send_reminder_batch
 from bot.config import RETENTION_ENABLED
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message, PreCheckoutQuery
 
@@ -32,7 +31,6 @@ from bot.keyboards import (
     get_progress_keyboard,
     get_privacy_keyboard,
     get_question_keyboard,
-    get_reminder_offer_keyboard,
     get_settings_keyboard,
     get_start_keyboard,
 )
@@ -455,6 +453,12 @@ async def answer_question(callback: CallbackQuery):
 
     started = time.perf_counter()
     try:
+        try:
+            await LearningDB.attribute_reminder_session_click(session_id, user_id)
+        except Exception:
+            # Attribution must never block a real learning answer.
+            logger.exception("Could not attribute inline reminder answer")
+
         session = await LearningDB.get_session(session_id, user_id)
         if not session:
             await callback.message.answer("Це заняття вже недоступне. Відкрий «Заняття на сьогодні».", reply_markup=get_back_keyboard())
@@ -844,12 +848,46 @@ async def process_successful_payment(message: Message):
 @router.callback_query(F.data.startswith("reminder_go:"))
 async def reminder_go(callback: CallbackQuery):
     await callback.answer()
+    delivery: Optional[Dict[str, Any]] = None
     try:
         delivery_id = str(UUID(str(callback.data).split(":", 1)[1]))
+        delivery = await LearningDB.get_reminder_delivery(delivery_id, callback.from_user.id)
         await LearningDB.click_reminder(delivery_id, callback.from_user.id)
     except Exception:
         logger.exception("Could not attribute reminder click")
-    # Active intro/practice sessions resume through the existing safe flow.
+
+    action = str((delivery or {}).get("target_action") or "daily")
+    target_session_id = str((delivery or {}).get("target_session_id") or "")
+
+    if action == "resume" and target_session_id:
+        try:
+            session = await LearningDB.get_session(target_session_id, callback.from_user.id)
+            if session and session.get("status") == "active":
+                await _send_current_question(
+                    callback.message,
+                    session,
+                    intro=session.get("session_type") == "intro",
+                )
+                return
+        except Exception:
+            logger.exception("Could not resume reminder target session")
+
+    if action == "focus":
+        await _start_or_resume(
+            callback.message,
+            callback.from_user.id,
+            "practice",
+            length_override=5,
+            practice_mode="focus",
+        )
+        return
+
+    if action == "intro":
+        await _start_or_resume(callback.message, callback.from_user.id, "intro")
+        return
+
+    # Re-checking the database keeps old buttons safe: an unfinished session is
+    # resumed before a new Daily is ever created.
     await _start_or_resume(callback.message, callback.from_user.id, "daily")
 
 
