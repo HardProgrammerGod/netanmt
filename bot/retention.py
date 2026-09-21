@@ -206,7 +206,7 @@ async def send_reminder_batch(bot: Any, db: Any) -> int:
                 try:
                     await db.log_event(
                         user_id,
-                        "question_shown",
+                        "retention_question_delivered",
                         {
                             "session_id": str(session["id"]),
                             "question_index": index,
@@ -214,7 +214,7 @@ async def send_reminder_batch(bot: Any, db: Any) -> int:
                             "source": "retention_first_question",
                             "delivery_id": delivery_id,
                         },
-                        event_key=f"shown:{session['id']}:{index}",
+                        event_key=f"retention_delivered:{delivery_id}",
                     )
                 except Exception:
                     logger.exception("Could not log inline reminder question")
