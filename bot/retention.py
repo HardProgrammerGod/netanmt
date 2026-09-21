@@ -1,87 +1,222 @@
-"""Useful, rotating reminder content; no AI/network dependency."""
+"""Segmented, persisted retention messages for Neta learning sessions."""
+
 import asyncio
+import html
 import logging
+from typing import Any, Dict, Optional, Tuple
+
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.keyboards import get_question_keyboard
+
 logger = logging.getLogger(__name__)
-TIPS = (
-    ('Interested in', 'Кажемо <b>interested in</b>, а не interested on.', 'I’m interested in learning English.'),
-    ('Since чи for?', '<b>Since</b> — точка початку; <b>for</b> — тривалість.', 'since Monday · for three days'),
-    ('Advice без -s', '<b>Advice</b> — незлічуване. Одна порада: a piece of advice.', 'That’s useful advice.'),
-    ('Enjoy + -ing', 'Після <b>enjoy</b> ставимо дієслово з -ing.', 'I enjoy reading.'),
-    ('Say чи tell?', '<b>Tell</b> зазвичай потребує адресата; say — ні.', 'Tell me the story. · Say hello.'),
-    ('Although', 'Після <b>although</b> потрібна частина речення з підметом і присудком.', 'Although it was late, we continued.'),
-    ('Despite', 'Після <b>despite</b> — іменник або -ing, без of.', 'Despite the rain, we went out.'),
-    ('Too та enough', '<b>Too</b> стоїть перед прикметником; enough — після.', 'too difficult · easy enough'),
-    ('Make чи do?', 'Запам’ятовуй цілі сполучення, а не окреме дієслово.', 'make a decision · do homework'),
-    ('Less чи fewer?', '<b>Fewer</b> — зі злічуваними в множині; less — з незлічуваними.', 'fewer mistakes · less time'),
-    ('Look forward to', 'Тут <b>to</b> — прийменник. Після нього ставимо -ing.', 'I look forward to seeing you.'),
-    ('Used to', '<b>Used to + дієслово</b> описує минулу звичку або стан.', 'I used to walk to school.'),
-    ('Be used to', '<b>Be used to + -ing</b> означає «бути звиклим».', 'I’m used to getting up early.'),
-    ('Borrow чи lend?', '<b>Borrow</b> — позичити в когось; lend — дати комусь.', 'Can I borrow your pen?'),
-    ('Actual — пастка', '<b>Actual</b> — фактичний, справжній; current — поточний.', 'the actual cost · the current situation'),
-    ('Eventually', '<b>Eventually</b> означає «зрештою», а не «можливо».', 'Eventually, we found the answer.'),
-    ('Present Perfect', 'Для завершеної дії з конкретним минулим часом зазвичай потрібен Past Simple.', 'I saw her yesterday.'),
-    ('Passive Voice', 'Базова формула: <b>be + третя форма дієслова</b>. Час змінює be.', 'The book was written in English.'),
-    ('First Conditional', 'Для реальної майбутньої умови: <b>if + Present Simple</b>.', 'If it rains, we will stay home.'),
-    ('Second Conditional', 'Для уявної ситуації: <b>if + Past Simple, would + дієслово</b>.', 'If I had more time, I would read more.'),
-    ('Neither … nor', 'Ця пара поєднує два заперечені варіанти.', 'The room was neither large nor bright.'),
-    ('Good at', 'Кажемо <b>good at + іменник або -ing</b>.', 'She is good at solving problems.'),
-    ('Depend on', 'У сполученні <b>depend on</b> потрібен саме on.', 'It depends on the weather.'),
-    ('Avoid + -ing', 'Після <b>avoid</b> використовуємо -ing.', 'Avoid making the same mistake.'),
-    ('A few чи few?', '<b>A few</b> — кілька; few підкреслює, що їх мало.', 'I have a few ideas.'),
-    ('A little чи little?', '<b>A little</b> — трохи; little підкреслює нестачу.', 'We have a little time left.'),
-    ('Reading: доказ', 'Вибирай відповідь, яку підтверджує текст. Правдоподібність сама по собі — не доказ.', 'Знайди речення, яке підтримує твій варіант.'),
-    ('Reading: перефразування', 'Правильна відповідь часто передає думку іншими словами.', 'not expensive → affordable'),
-    ('Reading: займенники', 'У завданні з пропусками перевір, до чого відсилають it, they і this.', 'They має узгоджуватися з попереднім контекстом.'),
-    ('Перевір контекст', 'Якщо два слова здаються правильними, прочитай речення до і після пропуску.', 'Шукай логіку, час і сталі сполучення.'),
-)
+LETTERS = ("A", "B", "C", "D")
+# Kept for compatibility with the v10 offline test/import surface. v12 copy is
+# selected by persisted segment + variant instead of rotating generic tips.
+TIPS = tuple(f"v10-tip-{index}" for index in range(30))
 
 
-def reminder_message(delivery):
-    index = int(delivery.get('tip_index') or 0) % len(TIPS)
-    title, rule, example = TIPS[index]
-    invitation = ('Можна повернутися без поспіху: коротке заняття вже готове.'
-                  if delivery.get('quiet') else 'Закріпимо англійську? Daily — 4 питання на сьогодні.')
-    text = f'<b>💡 {title}</b>\n\n{rule}\n<i>{example}</i>\n\n{invitation}'
-    if int(delivery.get('tip_index') or 0) == 0:
-        text += '\n\nЦе автоматична підказка Neta. Час можна змінити, нагадування — вимкнути нижче.'
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='⚡ Почати / продовжити', callback_data=f"reminder_go:{delivery['id']}")],
-        [InlineKeyboardButton(text='⚙️ Час', callback_data='show_settings'),
-         InlineKeyboardButton(text='Без нагадувань', callback_data='reminder_off')],
+def _payload(delivery: Dict[str, Any]) -> Dict[str, Any]:
+    value = delivery.get("payload") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _footer(delivery_id: str, button_text: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=button_text, callback_data=f"reminder_go:{delivery_id}")],
+        [
+            InlineKeyboardButton(text="⚙️ Час", callback_data="show_settings"),
+            InlineKeyboardButton(text="Без нагадувань", callback_data="reminder_off"),
+        ],
     ])
-    return text, keyboard
 
 
-async def send_reminder_batch(bot, db):
-    """Persisted claims prevent duplicate sends across concurrent workers/restarts.
+def _question_text(question: Dict[str, Any], index: int, total: int) -> str:
+    options = question.get("options") or {}
+    if isinstance(options, list):
+        options = {
+            letter: str(options[position]) if position < len(options) else ""
+            for position, letter in enumerate(LETTERS)
+        }
+    elif isinstance(options, dict):
+        options = {letter: str(options.get(letter, "")) for letter in LETTERS}
+    else:
+        options = {letter: "" for letter in LETTERS}
 
-    Delivery uncertainty favors a missed message over a duplicate. Telegram does
-    not support an idempotency key for sendMessage. Do not retry ambiguous sends.
-    """
+    option_lines = "\n".join(
+        f"<b>{letter}.</b> {html.escape(options.get(letter, ''))}"
+        for letter in LETTERS
+    )
+    body = html.escape(str(question.get("question_text") or ""))
+    return f"<b>{index + 1} із {total}</b>\n\n{body}\n\n{option_lines}"
+
+
+def reminder_message(
+    delivery: Dict[str, Any],
+    question_context: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, InlineKeyboardMarkup]:
+    """Build copy and CTA from the segment persisted before delivery."""
+    delivery_id = str(delivery["id"])
+    segment = str(delivery.get("segment") or "daily_ready")
+    variant = str(delivery.get("variant") or "a")
+    payload = _payload(delivery)
+
+    if segment == "abandoned":
+        answered = max(0, int(payload.get("answered_count") or 0))
+        total = max(answered + 1, int(payload.get("total") or 0))
+        if variant == "b":
+            text = (
+                "<b>Твій прогрес збережено</b>\n\n"
+                f"Уже готово <b>{answered}/{total}</b>. Продовжимо саме з того питання, де ти зупинився — спочатку нічого проходити не треба."
+            )
+        else:
+            text = (
+                "<b>Залишилося зовсім трохи</b>\n\n"
+                f"Ти вже виконав <b>{answered}/{total}</b>. Neta зберегла відповіді й відкриє наступне питання."
+            )
+        return text, _footer(delivery_id, "▶️ Продовжити з місця зупинки")
+
+    if segment == "daily_errors":
+        focus = html.escape(str(payload.get("focus_skill") or "сьогоднішні помилки"))
+        if variant == "b":
+            text = (
+                "<b>Neta Memory знайшла, що повторити</b>\n\n"
+                f"Фокус: <b>{focus}</b>. П'ять коротких питань допоможуть не повторити цю помилку на НМТ."
+            )
+        else:
+            text = (
+                "<b>Одна слабка тема вже чекає</b>\n\n"
+                f"Neta повернула в повторення: <b>{focus}</b>. Закріплення займе приблизно 4 хвилини."
+            )
+        return text, _footer(delivery_id, "🧠 Закріпити помилки · 5")
+
+    if segment == "first_question" and question_context:
+        session = question_context["session"]
+        question = question_context["question"]
+        index = int(session.get("current_index") or 0)
+        total = len(session.get("question_ids") or [])
+        opening = (
+            "<b>Перевір себе одним питанням</b>\n\nОбери A, B, C або D — без реєстрацій і довгого тесту."
+            if variant == "b"
+            else
+            "<b>Спробуй Neta прямо тут</b>\n\nОдне коротке питання. Після відповіді одразу отримаєш пояснення."
+        )
+        text = f"{opening}\n\n{_question_text(question, index, total)}"
+        question_keyboard = get_question_keyboard(
+            str(session["id"]), index, question.get("options") or {}
+        )
+        rows = list(question_keyboard.inline_keyboard)
+        rows.append([
+            InlineKeyboardButton(text="⚙️ Час", callback_data="show_settings"),
+            InlineKeyboardButton(text="Без нагадувань", callback_data="reminder_off"),
+        ])
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if segment == "reactivation":
+        if variant == "b":
+            text = (
+                "<b>Повернемо англійську без марафону?</b>\n\n"
+                "Neta підбере коротке заняття за твоєю історією. Три-чотири хвилини — і на сьогодні достатньо."
+            )
+        else:
+            text = (
+                "<b>Твій прогрес у Neta збережено</b>\n\n"
+                "Повернися на одне коротке заняття: бот дасть не випадкові вправи, а те, що зараз корисніше повторити."
+            )
+        return text, _footer(delivery_id, "⚡ Повернутися на 4 хв")
+
+    if variant == "b":
+        text = (
+            "<b>Daily уже готовий</b>\n\n"
+            "4 питання: одне повторення, один слабкий сигнал і нові завдання. Без довгого тесту."
+        )
+    else:
+        text = (
+            "<b>Сьогоднішні 4 питання готові</b>\n\n"
+            "Neta змішала нове з тим, що тобі варто повторити. Це приблизно 4 хвилини."
+        )
+    return text, _footer(delivery_id, "⚡ Почати Daily · 4")
+
+
+async def _prepare_first_question(
+    delivery: Dict[str, Any], db: Any
+) -> Optional[Dict[str, Any]]:
+    if str(delivery.get("segment") or "") != "first_question":
+        return None
+
+    user_id = int(delivery["user_id"])
+    session = await db.get_or_create_session(user_id, "intro", 3)
+    if str(session.get("status") or "") != "active":
+        return None
+
+    question_ids = [str(value) for value in (session.get("question_ids") or [])]
+    index = int(session.get("current_index") or 0)
+    if index < 0 or index >= len(question_ids):
+        return None
+
+    questions = await db.get_questions(question_ids)
+    if len(questions) != len(question_ids):
+        return None
+
+    await db.attach_reminder_session(
+        str(delivery["id"]), user_id, str(session["id"]), "intro"
+    )
+    delivery["target_session_id"] = str(session["id"])
+    delivery["target_action"] = "intro"
+    return {"session": session, "question": questions[index]}
+
+
+async def send_reminder_batch(bot: Any, db: Any) -> int:
+    """Claim before send so concurrent workers and restarts cannot duplicate."""
     deliveries = await db.claim_reminders()
     for delivery in deliveries:
-        user_id, delivery_id = int(delivery['user_id']), str(delivery['id'])
+        user_id = int(delivery["user_id"])
+        delivery_id = str(delivery["id"])
         try:
             if not await db.can_send_reminder(delivery_id):
-                await db.finish_reminder(delivery_id, 'skipped')
+                await db.finish_reminder(delivery_id, "skipped")
                 continue
-            text, keyboard = reminder_message(delivery)
+
+            question_context = await _prepare_first_question(delivery, db)
+            if str(delivery.get("segment") or "") == "first_question" and not question_context:
+                await db.finish_reminder(delivery_id, "skipped")
+                continue
+
+            text, keyboard = reminder_message(delivery, question_context)
             await bot.send_message(user_id, text, reply_markup=keyboard)
         except TelegramForbiddenError:
-            await db.finish_reminder(delivery_id, 'blocked')
+            await db.finish_reminder(delivery_id, "blocked")
             await db.set_user_inactive(user_id)
         except TelegramRetryAfter as exc:
-            await db.finish_reminder(delivery_id, 'failed')
-            # Stop the batch; unprocessed claims stay reserved today.
+            await db.finish_reminder(delivery_id, "failed")
             return max(60, int(exc.retry_after))
         except Exception:
-            logger.exception('Reminder send uncertain/failed for %s', user_id)
-            await db.finish_reminder(delivery_id, 'failed')
+            logger.exception("Reminder send uncertain/failed for %s", user_id)
+            await db.finish_reminder(delivery_id, "failed")
         else:
-            # If this write fails, keep the claim; NEVER resend the Telegram message.
-            await db.finish_reminder(delivery_id, 'sent')
+            await db.finish_reminder(delivery_id, "sent")
+            try:
+                await db.mark_reminder_sent(user_id)
+            except Exception:
+                logger.exception("Could not update last_reminder_at for %s", user_id)
+            if question_context:
+                session = question_context["session"]
+                index = int(session.get("current_index") or 0)
+                try:
+                    await db.log_event(
+                        user_id,
+                        "question_shown",
+                        {
+                            "session_id": str(session["id"]),
+                            "question_index": index,
+                            "session_type": "intro",
+                            "source": "retention_first_question",
+                            "delivery_id": delivery_id,
+                        },
+                        event_key=f"shown:{session['id']}:{index}",
+                    )
+                except Exception:
+                    logger.exception("Could not log inline reminder question")
         await asyncio.sleep(0.08)
     return 60
