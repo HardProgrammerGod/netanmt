@@ -1,6 +1,4 @@
 import logging
-import random
-import re
 import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -657,11 +655,59 @@ class LearningDB:
 
     @staticmethod
     async def claim_reminders() -> List[Dict[str, Any]]:
-        return await DBClient._run_sync(lambda: supabase.rpc("claim_learning_reminders_v10", {"p_limit": 20}).execute().data or [])
+        return await DBClient._run_sync(lambda: supabase.rpc("claim_learning_reminders_v12", {"p_limit": 20}).execute().data or [])
 
     @staticmethod
     async def can_send_reminder(delivery_id: str) -> bool:
-        return bool(await DBClient._run_sync(lambda: supabase.rpc("can_send_learning_reminder_v10", {"p_id": delivery_id}).execute().data))
+        return bool(await DBClient._run_sync(lambda: supabase.rpc("can_send_learning_reminder_v12", {"p_id": delivery_id}).execute().data))
+
+    @staticmethod
+    async def get_reminder_delivery(delivery_id: str, user_id: int) -> Optional[Dict[str, Any]]:
+        def _op():
+            result = (
+                supabase.table("learning_reminder_deliveries")
+                .select("*")
+                .eq("id", str(delivery_id))
+                .eq("user_id", int(user_id))
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        return await DBClient._run_sync(_op)
+
+    @staticmethod
+    async def attach_reminder_session(
+        delivery_id: str,
+        user_id: int,
+        session_id: str,
+        target_action: str,
+    ) -> None:
+        payload = {
+            "target_session_id": str(session_id),
+            "target_action": str(target_action)[:40],
+        }
+        await DBClient._run_sync(lambda: (
+            supabase.table("learning_reminder_deliveries")
+            .update(payload)
+            .eq("id", str(delivery_id))
+            .eq("user_id", int(user_id))
+            .eq("status", "claimed")
+            .execute()
+        ))
+
+    @staticmethod
+    async def attribute_reminder_session_click(session_id: str, user_id: int) -> None:
+        """Attribute an inline answer shown inside a retention message."""
+        now = datetime.now(timezone.utc).isoformat()
+        await DBClient._run_sync(lambda: (
+            supabase.table("learning_reminder_deliveries")
+            .update({"clicked_at": now})
+            .eq("user_id", int(user_id))
+            .eq("target_session_id", str(session_id))
+            .eq("status", "sent")
+            .is_("clicked_at", "null")
+            .execute()
+        ))
 
     @staticmethod
     async def finish_reminder(delivery_id: str, status: str) -> None:
@@ -676,7 +722,7 @@ class LearningDB:
 
     @staticmethod
     async def product_funnel(days: int = 30) -> Dict[str, Any]:
-        return await DBClient._run_sync(lambda: supabase.rpc("get_product_funnel_v10", {"p_days": days}).execute().data or {})
+        return await DBClient._run_sync(lambda: supabase.rpc("get_product_funnel_v12", {"p_days": days}).execute().data or {})
 
 
     @staticmethod
