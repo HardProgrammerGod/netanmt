@@ -541,11 +541,14 @@ async def admin_growth_funnel(
             click_count = int(row.get("clicked") or 0)
             return_count = int(row.get("completed_24h") or 0)
             blocked_count = int(row.get("blocked") or 0)
+            failed_count = int(row.get("failed") or 0)
+            delivery_errors = blocked_count + failed_count
             lines.append(
                 f"• {label} · {variant}: <b>{sent_count}</b> sent · "
                 f"{_percent(click_count, sent_count)} click · "
                 f"{_percent(return_count, sent_count)} lesson · "
-                f"{blocked_count} blocked"
+                f"{delivery_errors} blocked/failed · "
+                f"{_percent(delivery_errors, sent_count + delivery_errors)}"
             )
 
     lines.append("\n<b>Джерела нових /start</b>")
